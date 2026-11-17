@@ -116,7 +116,7 @@ wrap_with_args! {
     fn on_before_popup(
       &self,
       browser: Option<&mut Browser>,
-      _frame: Option<&mut Frame>,
+      frame: Option<&mut Frame>,
       popup_id: std::os::raw::c_int,
       target_url: Option<&CefString>,
       _target_frame_name: Option<&CefString>,
@@ -129,6 +129,16 @@ wrap_with_args! {
       _extra_info: Option<&mut Option<DictionaryValue>>,
       _no_javascript_access: Option<&mut i32>,
     ) -> std::os::raw::c_int {
+      // A frame left without `window.ipc`, or nested in one, opens no popup. A popup has no
+      // parent frame, so its renderer finds no listed host above it, and its opener can
+      // script a blank one. See `Cef::frame_hosts_without_ipc`.
+      let hosts = &self.context.frame_hosts_without_ipc;
+      if !hosts.is_empty()
+        && frame.is_some_and(|frame| crate::cef_impl::ipc::frame_without_ipc(&*frame, hosts))
+      {
+        log::debug!("refused a popup from a frame without `window.ipc`");
+        return 1;
+      }
       if let Some(window_info) = window_info {
         window_info.windowless_rendering_enabled = 0;
         window_info.shared_texture_enabled = 0;

@@ -676,6 +676,17 @@ impl Cef {
   /// its own frame to a `data:` or `blob:` document it wrote, which is on no host and would
   /// get `window.ipc`. Remove such a frame rather than navigate it elsewhere.
   ///
+  /// Such a frame, or one nested in it, opens no popup either: `window.open` gets `null` and
+  /// a `target="_blank"` link does nothing. A popup has no parent frame, so its renderer
+  /// would find no listed host above it, and the opener can script a blank one.
+  ///
+  /// With any host listed, a frame whose parent is in another renderer process also gets no
+  /// `window.ipc`, wherever it is: a renderer sees only the frames in its own process, and a
+  /// frame on another site (one an embedded document embeds in turn, say) is in a process
+  /// apart from the listed frame above it. Frames on the webview's own site are unaffected.
+  /// The browser process, which sees every frame, drops any IPC message from a frame on or
+  /// nested in a listed host.
+  ///
   /// Hosts compare case-insensitively and must match exactly: `apps.localhost` does not
   /// cover `sub.apps.localhost`. A custom scheme `apps` is served at `apps.localhost`
   /// (see `custom_scheme_url`). Calling it again adds to the list. Renderer processes read
