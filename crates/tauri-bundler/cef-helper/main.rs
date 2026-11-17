@@ -57,7 +57,8 @@ fn url_on_hosts(url: &str, hosts: &[String]) -> bool {
   url_host(url).is_some_and(|host| hosts.iter().any(|h| h.eq_ignore_ascii_case(host)))
 }
 
-/// Whether the frame or any frame it is nested in is on one of `hosts`.
+/// Whether the frame or any frame it is nested in is on one of `hosts`, or may be: a frame
+/// whose parent is in another renderer process counts, since this process cannot see it.
 fn frame_without_ipc(frame: &Frame, hosts: &[String]) -> bool {
   let mut frame = Some(frame.clone());
   while let Some(current) = frame {
@@ -65,6 +66,9 @@ fn frame_without_ipc(frame: &Frame, hosts: &[String]) -> bool {
       return true;
     }
     frame = current.parent();
+    if frame.is_none() && current.is_main() == 0 {
+      return true;
+    }
   }
   false
 }

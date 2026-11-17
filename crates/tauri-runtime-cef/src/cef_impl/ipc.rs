@@ -80,19 +80,47 @@ pub(crate) fn navigation_leaves_hosts(current: &str, target: &str, hosts: &[Stri
   url_on_hosts(current, hosts) && !url_on_hosts(target, hosts)
 }
 
-/// Whether the frame or any frame it is nested in is on one of `hosts`.
+/// A frame and the frames it is nested in, as [`frame_without_ipc`] walks them.
+pub(crate) trait FrameTree: Clone {
+  /// The frame's document URL.
+  fn document_url(&self) -> String;
+  /// Whether this is the top frame of its browser, a popup's included.
+  fn is_main_frame(&self) -> bool;
+  /// The frame it is nested in, if this process can see it.
+  fn parent_frame(&self) -> Option<Self>;
+}
+
+impl FrameTree for Frame {
+  fn document_url(&self) -> String {
+    CefString::from(&self.url()).to_string()
+  }
+
+  fn is_main_frame(&self) -> bool {
+    self.is_main() != 0
+  }
+
+  fn parent_frame(&self) -> Option<Self> {
+    self.parent()
+  }
+}
+
+/// Whether the frame or any frame it is nested in is on one of `hosts`, or may be.
 ///
 /// Nested frames count because a document can script the `about:blank` and `about:srcdoc`
-/// frames it creates, which have no host of their own. In a renderer, a parent in another
-/// renderer process is not visible, and needs no check: the document there cannot script this
-/// frame. The browser process sees every frame.
-pub(crate) fn frame_without_ipc(frame: &Frame, hosts: &[String]) -> bool {
+/// frames it creates, which have no host of their own. A frame whose parent is in another
+/// renderer process counts too: a renderer sees only the frames in its own process, and a
+/// frame on another site (one an app embeds, say) is in another process than the frame on
+/// `hosts` above it. The browser process sees every frame, so there the walk is exact.
+pub(crate) fn frame_without_ipc<F: FrameTree>(frame: &F, hosts: &[String]) -> bool {
   let mut frame = Some(frame.clone());
   while let Some(current) = frame {
-    if url_on_hosts(&CefString::from(&current.url()).to_string(), hosts) {
+    if url_on_hosts(&current.document_url(), hosts) {
       return true;
     }
-    frame = current.parent();
+    frame = current.parent_frame();
+    if frame.is_none() && !current.is_main_frame() {
+      return true;
+    }
   }
   false
 }
@@ -223,6 +251,17 @@ pub(crate) fn on_process_message_received<T: UserEvent>(
   if CefString::from(&message.name()).to_string() != IPC_MESSAGE_NAME {
     return 0;
   }
+  // Whatever its renderer defined, a message from a frame left without `window.ipc`, or
+  // nested in one, goes nowhere. The browser process sees every frame.
+  let hosts = &client.context.frame_hosts_without_ipc;
+  if !hosts.is_empty()
+    && frame
+      .as_deref()
+      .is_some_and(|frame| frame_without_ipc(frame, hosts))
+  {
+    log::debug!("dropped an IPC message from a frame without `window.ipc`");
+    return 1;
+  }
   let Some(handler) = client.handlers.ipc_handler.as_ref() else {
     return 1;
   };
@@ -257,9 +296,56 @@ pub(crate) fn on_process_message_received<T: UserEvent>(
 #[cfg(test)]
 mod tests {
   use super::{
-    FRAME_HOSTS_WITHOUT_IPC_SWITCH, frame_hosts_without_ipc_from, navigation_leaves_hosts,
-    url_host, url_on_hosts,
+    FRAME_HOSTS_WITHOUT_IPC_SWITCH, FrameTree, frame_hosts_without_ipc_from, frame_without_ipc,
+    navigation_leaves_hosts, url_host, url_on_hosts,
   };
+
+  /// A frame of a renderer's view: a URL, and the chain of frames above it this process sees.
+  #[derive(Clone)]
+  struct Seen {
+    url: &'static str,
+    main: bool,
+    parent: Option<Box<Seen>>,
+  }
+
+  impl FrameTree for Seen {
+    fn document_url(&self) -> String {
+      self.url.to_string()
+    }
+
+    fn is_main_frame(&self) -> bool {
+      self.main
+    }
+
+    fn parent_frame(&self) -> Option<Self> {
+      self.parent.as_deref().cloned()
+    }
+  }
+
+  fn top(url: &'static str) -> Seen {
+    Seen {
+      url,
+      main: true,
+      parent: None,
+    }
+  }
+
+  fn nested(url: &'static str, parent: Seen) -> Seen {
+    Seen {
+      url,
+      main: false,
+      parent: Some(Box::new(parent)),
+    }
+  }
+
+  /// A frame whose parent is in another process: this process sees no frame above it.
+  fn out_of_process(url: &'static str) -> Seen {
+    Seen {
+      url,
+      main: false,
+      parent: None,
+    }
+  }
 
   fn hosts(args: &[&str]) -> Vec<String> {
     frame_hosts_without_ipc_from(args.iter().map(std::ffi::OsString::from))
@@ -345,6 +431,46 @@ mod tests {
       &hosts
     ));
     assert!(!navigation_leaves_hosts(app, "data:text/html,", &[]));
+  }
+
+  #[test]
+  fn frames_on_or_under_the_hosts_have_no_ipc() {
+    let hosts = ["apps.localhost".to_string()];
+    let window = top("http://tauri.localhost/");
+    let app = nested("http://apps.localhost/token/index.html", window.clone());
+    assert!(!frame_without_ipc(&window, &hosts));
+    assert!(frame_without_ipc(&app, &hosts));
+    assert!(frame_without_ipc(
+      &nested("about:srcdoc", app.clone()),
+      &hosts
+    ));
+    assert!(frame_without_ipc(
+      &nested("about:blank", nested("data:text/html,", app)),
+      &hosts
+    ));
+    // A popup on the hosts, whoever opened it.
+    assert!(frame_without_ipc(&top("http://apps.localhost/x"), &hosts));
+    // Same-process frames elsewhere keep it.
+    assert!(!frame_without_ipc(
+      &nested("about:blank", window.clone()),
+      &hosts
+    ));
+    assert!(!frame_without_ipc(&top("about:blank"), &hosts));
+  }
+
+  #[test]
+  fn a_frame_whose_parent_is_in_another_process_has_no_ipc() {
+    let hosts = ["apps.localhost".to_string()];
+    // A cross-site frame an app embeds, and what it nests in turn: the renderer cannot see
+    // the app above it.
+    let embedded = out_of_process("https://maps.example/embed");
+    assert!(frame_without_ipc(&embedded, &hosts));
+    assert!(frame_without_ipc(&nested("about:srcdoc", embedded), &hosts));
+    assert!(frame_without_ipc(
+      &out_of_process("chrome-error://chromewebdata/"),
+      &hosts
+    ));
+    // Without hosts, the walk never runs: see `on_context_created`.
   }
 
   #[test]
