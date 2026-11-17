@@ -83,9 +83,10 @@ pub(crate) fn navigation_leaves_hosts(current: &str, target: &str, hosts: &[Stri
 /// Whether the frame or any frame it is nested in is on one of `hosts`.
 ///
 /// Nested frames count because a document can script the `about:blank` and `about:srcdoc`
-/// frames it creates, which have no host of their own. A parent in another renderer process
-/// is not visible here, and needs no check: the document there cannot script this frame.
-fn frame_without_ipc(frame: &Frame, hosts: &[String]) -> bool {
+/// frames it creates, which have no host of their own. In a renderer, a parent in another
+/// renderer process is not visible, and needs no check: the document there cannot script this
+/// frame. The browser process sees every frame.
+pub(crate) fn frame_without_ipc(frame: &Frame, hosts: &[String]) -> bool {
   let mut frame = Some(frame.clone());
   while let Some(current) = frame {
     if url_on_hosts(&CefString::from(&current.url()).to_string(), hosts) {

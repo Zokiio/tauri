@@ -991,6 +991,7 @@ impl<T: UserEvent> WinitCefApp<T> {
       &custom_protocol_scheme,
       scheme_registry.clone(),
       main_thread,
+      context.frame_hosts_without_ipc.clone(),
       on_initialized,
     );
     if request_context.is_none() {
