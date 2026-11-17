@@ -314,6 +314,7 @@ pub(crate) fn request_context_from_webview_attributes<'a>(
   custom_protocol_scheme: &str,
   scheme_registry: request_handler::SchemeRegistry,
   main_thread: request_handler::MainThreadDispatcher,
+  frame_hosts_without_ipc: Arc<Vec<String>>,
   on_initialized: RequestContextInitContinuation,
 ) -> Option<RequestContext> {
   let own_cache_path = |cache_path: PathBuf| {
@@ -390,6 +391,7 @@ pub(crate) fn request_context_from_webview_attributes<'a>(
           scheme_registry.clone(),
           scheme.clone(),
           main_thread.clone(),
+          frame_hosts_without_ipc.clone(),
         )),
       );
     }

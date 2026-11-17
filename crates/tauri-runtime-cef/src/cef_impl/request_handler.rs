@@ -534,6 +534,8 @@ wrap_scheme_handler_factory! {
     registry: SchemeRegistry,
     scheme: String,
     main_thread: MainThreadDispatcher,
+    // `Cef::frame_hosts_without_ipc`.
+    frame_hosts_without_ipc: Arc<Vec<String>>,
   }
 
   impl SchemeHandlerFactory {
@@ -542,8 +544,27 @@ wrap_scheme_handler_factory! {
       browser: Option<&mut Browser>,
       frame: Option<&mut Frame>,
       _scheme_name: Option<&CefString>,
-      _request: Option<&mut Request>,
+      request: Option<&mut Request>,
     ) -> Option<ResourceHandler> {
+      // A frame left without `window.ipc`, or nested in one, reaches no custom scheme but
+      // the hosts it is on: Tauri's `ipc` protocol would be the same IPC by another door,
+      // and the application's other schemes are no business of its document either. Keyed
+      // on the frame CEF names for the request, never on headers the renderer wrote.
+      if let (Some(frame), Some(request)) = (frame.as_deref(), request.as_deref())
+        && !self.frame_hosts_without_ipc.is_empty()
+        && crate::cef_impl::ipc::frame_without_ipc(frame, &self.frame_hosts_without_ipc)
+        && !crate::cef_impl::ipc::url_on_hosts(
+          &CefString::from(&request.url()).to_string(),
+          &self.frame_hosts_without_ipc,
+        )
+      {
+        log::debug!(
+          "refused a `{}` request from a frame without `window.ipc`",
+          self.scheme
+        );
+        return Some(refused_from_frame_without_ipc(self.main_thread.clone()));
+      }
+
       let (webview_label, handler, initialization_scripts) = match browser {
         Some(browser) => {
           let id = browser.identifier();
@@ -607,6 +628,32 @@ wrap_scheme_handler_factory! {
       }))
     }
   }
+}
+
+/// The answer to a custom-scheme request from a frame without `window.ipc` (see
+/// `UriSchemeHandlerFactory::create`): `403`, readable by the document so it can tell, and
+/// nothing from the application's handler.
+fn refused_from_frame_without_ipc(main_thread: MainThreadDispatcher) -> ResourceHandler {
+  let handler: Box<UriSchemeProtocolHandler> = Box::new(|_label, _request, responder| {
+    let response = http::Response::builder()
+      .status(http::StatusCode::FORBIDDEN)
+      .header(CONTENT_TYPE, "text/plain")
+      .header(http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+      .body(Cow::Borrowed(
+        b"refused: this frame has no IPC and reaches no other custom scheme".as_slice(),
+      ))
+      .expect("a static response");
+    responder(response);
+  });
+  WebResourceHandler::build(WebResourceHandlerArgs {
+    webview_label: String::new(),
+    handler: Arc::new(handler),
+    initialization_scripts: Arc::new(Vec::new()),
+    is_main_frame: false,
+    initiator_origin: None,
+    main_thread,
+    response: Arc::new(RefCell::new(None)),
+  })
 }
 
 struct ThreadSafe<T>(T);
