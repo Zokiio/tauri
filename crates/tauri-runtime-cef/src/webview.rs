@@ -789,6 +789,14 @@ impl<T: UserEvent> WinitCefApp<T> {
         .console_message_handler
         .clone(),
       permission_request_handler: pending.permission_request_handler.take().map(Arc::from),
+      cef_permission_handler: pending
+        .runtime_specific_attributes
+        .cef_permission_handler
+        .take(),
+      cef_media_permission_handler: pending
+        .runtime_specific_attributes
+        .cef_media_permission_handler
+        .take(),
       web_content_process_terminate_handler,
     };
 
@@ -1517,6 +1525,15 @@ pub struct CefWebviewAttributes {
   /// Scoped to this webview's own native browser, so neither a CEF-owned popup's
   /// output nor that of a DevTools window opened on this webview is reported here.
   pub console_message_handler: Option<Arc<ConsoleMessageHandler>>,
+  /// Policy for raw CEF permission prompts, including the requesting origin.
+  ///
+  /// Takes precedence over the portable permission handler and Alloy defaults.
+  /// Chromium may reuse the stored decision for later requests from the same origin.
+  pub cef_permission_handler: Option<Arc<CefPermissionHandler>>,
+  /// Policy for raw CEF media access requests, evaluated for every capture request.
+  ///
+  /// Takes precedence over the portable permission handler and Alloy defaults.
+  pub cef_media_permission_handler: Option<Arc<CefPermissionHandler>>,
   /// Families of Chrome commands this webview keeps rather than swallows.
   ///
   /// Empty by default, which blocks every group in [`ChromeCommandGroup`].
@@ -1530,6 +1547,24 @@ pub struct CefWebviewAttributes {
   pub browser_settings_callback: Option<Arc<BrowserSettingsCallback>>,
 }
 
+/// Policy for a CEF permission prompt or media access request.
+///
+/// The bitmask is unmodified and uses the CEF enum for that callback:
+/// `cef_permission_request_types_t` or `cef_media_access_permission_types_t`.
+/// This callback runs synchronously on CEF's UI thread.
+pub type CefPermissionHandler = dyn Fn(&str, u32) -> CefPermissionDecision + Send + Sync;
+
+/// The application's decision for the entire CEF permission bitmask.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CefPermissionDecision {
+  /// Grant all requested permissions. Desktop capture still uses CEF's source picker.
+  Allow,
+  /// Refuse all requested permissions.
+  Deny,
+  /// Use CEF's native handling without the runtime's automatic Alloy grants.
+  Default,
+}
+
 impl std::fmt::Debug for CefWebviewAttributes {
   fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     formatter
@@ -1540,6 +1575,14 @@ impl std::fmt::Debug for CefWebviewAttributes {
       .field(
         "console_message_handler",
         &self.console_message_handler.is_some(),
+      )
+      .field(
+        "cef_permission_handler",
+        &self.cef_permission_handler.is_some(),
+      )
+      .field(
+        "cef_media_permission_handler",
+        &self.cef_media_permission_handler.is_some(),
       )
       .field("allowed_chrome_commands", &self.allowed_chrome_commands)
       .field(

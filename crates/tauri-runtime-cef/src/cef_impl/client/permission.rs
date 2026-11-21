@@ -53,6 +53,8 @@ use cef::sys::cef_permission_request_types_t as PermissionType;
 use cef::*;
 use tauri_runtime::webview::{PermissionKind, PermissionResponse};
 
+use crate::{CefPermissionDecision, CefPermissionHandler};
+
 /// The application's answer to a permission request, as
 /// `PendingWebview::permission_request_handler` carries it.
 ///
@@ -169,7 +171,10 @@ const MEDIA_PERMISSION_KINDS: &[(u32, PermissionKind)] = &[
 /// request is granted only when the application allowed every type in it. Anything
 /// else leaves part of the request unanswered, and the platform default runs for it
 /// unchanged.
+#[derive(Debug, PartialEq, Eq)]
 enum AppDecision {
+  /// Explicitly defer to CEF without applying the automatic Alloy grants.
+  Defer,
   /// The application denied at least one of the requested permissions.
   Denied,
   /// The application allowed every requested permission.
@@ -182,6 +187,8 @@ enum AppDecision {
 wrap_permission_handler! {
   pub struct TauriCefPermissionHandler {
     permission_request_handler: Option<Arc<PermissionRequestHandler>>,
+    cef_permission_handler: Option<Arc<CefPermissionHandler>>,
+    cef_media_permission_handler: Option<Arc<CefPermissionHandler>>,
   }
 
   impl PermissionHandler {
@@ -195,7 +202,14 @@ wrap_permission_handler! {
     ) -> ::std::os::raw::c_int {
       let host = browser_host(browser);
 
-      match self.decide(requested_permissions, media_permission_kind) {
+      match decide(
+        self.cef_media_permission_handler.as_deref(),
+        requesting_origin.map(ToString::to_string).as_deref(),
+        self.permission_request_handler.as_deref(),
+        requested_permissions,
+        media_permission_kind,
+      ) {
+        AppDecision::Defer => 0,
         // Answer for the application, whatever the runtime style: neither Chrome's
         // prompt nor Alloy's blanket grant may override an explicit answer.
         AppDecision::Denied => {
@@ -264,13 +278,20 @@ wrap_permission_handler! {
       &self,
       browser: Option<&mut Browser>,
       _prompt_id: u64,
-      _requesting_origin: Option<&CefString>,
+      requesting_origin: Option<&CefString>,
       requested_permissions: u32,
       callback: Option<&mut PermissionPromptCallback>,
     ) -> ::std::os::raw::c_int {
       let host = browser_host(browser);
 
-      match self.decide(requested_permissions, permission_kind) {
+      match decide(
+        self.cef_permission_handler.as_deref(),
+        requesting_origin.map(ToString::to_string).as_deref(),
+        self.permission_request_handler.as_deref(),
+        requested_permissions,
+        permission_kind,
+      ) {
+        AppDecision::Defer => 0,
         // Answer for the application, whatever the runtime style, and without
         // showing Chrome's prompt: the application already decided.
         AppDecision::Denied => {
@@ -315,37 +336,50 @@ wrap_permission_handler! {
   }
 }
 
-impl TauriCefPermissionHandler {
-  /// Asks the application about every type set in `requested` and combines the
-  /// answers, as [`AppDecision`] describes.
-  ///
-  /// `kind` names the [`PermissionKind`] of one request type; the two CEF request
-  /// bitmasks number their types differently, so each entry point passes its own.
-  fn decide(&self, requested: u32, kind: fn(u32) -> PermissionKind) -> AppDecision {
-    let Some(handler) = &self.permission_request_handler else {
-      return AppDecision::NoOpinion;
+/// Native policy answers the complete CEF request before portable policy maps
+/// its individual bits. Only an absent or undecided portable handler reaches
+/// the automatic Alloy defaults.
+fn decide(
+  native: Option<&CefPermissionHandler>,
+  origin: Option<&str>,
+  portable: Option<&PermissionRequestHandler>,
+  requested: u32,
+  kind: fn(u32) -> PermissionKind,
+) -> AppDecision {
+  if let Some(native) = native {
+    let Some(origin) = origin.filter(|origin| !origin.is_empty()) else {
+      return AppDecision::Denied;
     };
+    return match native(origin, requested) {
+      CefPermissionDecision::Allow => AppDecision::Allowed,
+      CefPermissionDecision::Deny => AppDecision::Denied,
+      CefPermissionDecision::Default => AppDecision::Defer,
+    };
+  }
 
-    // A refusal short-circuits: nothing after it could weaken it, so the types past
-    // it are not asked about. A handler that logs or keeps state therefore sees
-    // only a prefix of a denied request. That is deliberate — the handler is a
-    // policy predicate, not an event feed.
-    let mut asked = false;
-    let mut allowed_all = true;
-    for permission in requested_permissions(requested) {
-      asked = true;
-      match handler(kind(permission)) {
-        PermissionResponse::Deny => return AppDecision::Denied,
-        PermissionResponse::Allow => {}
-        PermissionResponse::Default => allowed_all = false,
-      }
-    }
+  let Some(handler) = portable else {
+    return AppDecision::NoOpinion;
+  };
 
-    if asked && allowed_all {
-      AppDecision::Allowed
-    } else {
-      AppDecision::NoOpinion
+  // A refusal short-circuits: nothing after it could weaken it, so the types past
+  // it are not asked about. A handler that logs or keeps state therefore sees
+  // only a prefix of a denied request. That is deliberate — the handler is a
+  // policy predicate, not an event feed.
+  let mut asked = false;
+  let mut allowed_all = true;
+  for permission in requested_permissions(requested) {
+    asked = true;
+    match handler(kind(permission)) {
+      PermissionResponse::Deny => return AppDecision::Denied,
+      PermissionResponse::Allow => {}
+      PermissionResponse::Default => allowed_all = false,
     }
+  }
+
+  if asked && allowed_all {
+    AppDecision::Allowed
+  } else {
+    AppDecision::NoOpinion
   }
 }
 
@@ -470,6 +504,60 @@ fn allow_content_settings(
       None,
       *setting,
       ContentSettingValues::ALLOW,
+    );
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn native_prompt_policy_sees_origin_and_all_network_bits() {
+    let origin = "https://example.test";
+    let network = PermissionType::CEF_PERMISSION_TYPE_LOCAL_NETWORK_ACCESS_DEPRECATED as u32
+      | PermissionType::CEF_PERMISSION_TYPE_LOCAL_NETWORK as u32
+      | PermissionType::CEF_PERMISSION_TYPE_LOOPBACK_NETWORK as u32;
+    assert_eq!(network, (1 << 25) | (1 << 26) | (1 << 27));
+    let deny = move |actual_origin: &str, mask| {
+      assert_eq!(actual_origin, origin);
+      assert_eq!(mask, network);
+      CefPermissionDecision::Deny
+    };
+
+    assert_eq!(
+      decide(
+        Some(&deny),
+        Some(origin),
+        Some(&|_| PermissionResponse::Allow),
+        network,
+        permission_kind
+      ),
+      AppDecision::Denied
+    );
+  }
+
+  #[test]
+  fn native_media_policy_cannot_reach_automatic_alloy_grant() {
+    let requested = AUDIO_CAPTURE | VIDEO_CAPTURE;
+    for (answer, decision) in [
+      (CefPermissionDecision::Deny, AppDecision::Denied),
+      (CefPermissionDecision::Default, AppDecision::Defer),
+    ] {
+      assert_eq!(
+        decide(
+          Some(&move |_, _| answer),
+          Some("https://example.test"),
+          None,
+          requested,
+          media_permission_kind
+        ),
+        decision
+      );
+    }
+    assert_eq!(
+      decide(None, None, None, requested, media_permission_kind),
+      AppDecision::NoOpinion
     );
   }
 }
