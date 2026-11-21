@@ -183,11 +183,35 @@ fn is_app_protocol_url(url: &Url, protocols: &[String]) -> bool {
   }
 }
 
+fn answer_proxy_challenge(
+  handler: Option<&crate::AuthCredentialsHandler>,
+  is_proxy: bool,
+  host: Option<&CefString>,
+  port: i32,
+  realm: Option<&CefString>,
+  scheme: Option<&CefString>,
+  answer: impl FnOnce(&str, &str),
+) -> i32 {
+  let (true, Some(handler), Some(host), Ok(port)) = (is_proxy, handler, host, u16::try_from(port))
+  else {
+    return 0;
+  };
+  let host = host.to_string();
+  let realm = realm.map(ToString::to_string).unwrap_or_default();
+  let scheme = scheme.map(ToString::to_string).unwrap_or_default();
+  let Some((username, password)) = handler(&host, port, &realm, &scheme) else {
+    return 0;
+  };
+  answer(&username, &password);
+  1
+}
+
 wrap_with_args! {
   wrap_request_handler => WebRequestHandlerArgs;
 
   pub struct WebRequestHandler<T: UserEvent> {
     navigation_handler: Option<Arc<NavigationHandler>>,
+    auth_credentials_handler: Option<Arc<crate::AuthCredentialsHandler>>,
     frame_event_handler: Option<Arc<crate::FrameEventHandler>>,
     context: RuntimeContext<T>,
     window_id: WindowId,
@@ -202,6 +226,32 @@ wrap_with_args! {
   }
 
   impl RequestHandler {
+    fn auth_credentials(
+      &self,
+      _browser: Option<&mut Browser>,
+      _origin_url: Option<&CefString>,
+      is_proxy: i32,
+      host: Option<&CefString>,
+      port: i32,
+      realm: Option<&CefString>,
+      scheme: Option<&CefString>,
+      callback: Option<&mut AuthCallback>,
+    ) -> i32 {
+      let Some(callback) = callback else { return 0 };
+      answer_proxy_challenge(
+        self.auth_credentials_handler.as_deref(),
+        is_proxy != 0,
+        host,
+        port,
+        realm,
+        scheme,
+        |username, password| callback.cont(
+          Some(&CefString::from(username)),
+          Some(&CefString::from(password)),
+        ),
+      )
+    }
+
     /// Answers a TLS certificate that does not validate, per
     /// [`CertificateErrorPolicy`](crate::CertificateErrorPolicy).
     ///
@@ -815,5 +865,48 @@ mod app_protocol_tests {
     ] {
       assert!(!is_app_protocol_url(&url.parse().unwrap(), &names), "{url}");
     }
+  }
+}
+
+#[cfg(test)]
+mod proxy_auth_tests {
+  use super::*;
+
+  #[test]
+  fn only_proxy_challenges_pass_credentials_to_cef() {
+    crate::initialize_cef_test_api();
+    let credentials = std::cell::RefCell::new(None);
+    let host = CefString::from("127.0.0.1");
+    let realm = CefString::from("test");
+    let scheme = CefString::from("basic");
+    let handler = |host: &str, port, realm: &str, scheme: &str| {
+      assert_eq!(
+        (host, port, realm, scheme),
+        ("127.0.0.1", 8080, "test", "basic")
+      );
+      Some(("test-user".to_owned(), "test-password".to_owned()))
+    };
+    let answer = |is_proxy, port| {
+      answer_proxy_challenge(
+        Some(&handler),
+        is_proxy,
+        Some(&host),
+        port,
+        Some(&realm),
+        Some(&scheme),
+        |username, password| {
+          *credentials.borrow_mut() = Some((username.to_owned(), password.to_owned()));
+        },
+      )
+    };
+
+    assert_eq!(answer(false, 9), 0);
+    assert_eq!(answer(true, -1), 0);
+    assert_eq!(*credentials.borrow(), None);
+    assert_eq!(answer(true, 8080), 1);
+    assert_eq!(
+      *credentials.borrow(),
+      Some(("test-user".into(), "test-password".into())),
+    );
   }
 }

@@ -829,6 +829,10 @@ impl<T: UserEvent> WinitCefApp<T> {
         .console_message_handler
         .clone(),
       permission_request_handler: pending.permission_request_handler.take().map(Arc::from),
+      auth_credentials_handler: pending
+        .runtime_specific_attributes
+        .auth_credentials_handler
+        .clone(),
       cef_permission_handler: pending
         .runtime_specific_attributes
         .cef_permission_handler
@@ -1594,6 +1598,8 @@ pub struct CefWebviewAttributes {
   /// Use a profile dedicated to untrusted content with `without_ipc` and keep it
   /// separate from profiles that register app protocols.
   pub shared_request_context: Option<cef::RequestContext>,
+  /// Supplies credentials for proxy authentication challenges on the CEF IO thread.
+  pub auth_credentials_handler: Option<Arc<AuthCredentialsHandler>>,
   /// Chromium's bypass rules for this profile's fixed-server proxy.
   pub proxy_bypass_list: Option<String>,
   /// Families of Chrome commands this webview keeps rather than swallows.
@@ -1608,6 +1614,11 @@ pub struct CefWebviewAttributes {
   /// `databases`, `webgl`, `tab_to_links`, `javascript_dom_paste`, `default_encoding`.
   pub browser_settings_callback: Option<Arc<BrowserSettingsCallback>>,
 }
+
+/// Supplies a username and password for a proxy challenge.
+/// The arguments are the proxy host, port, realm, and authentication scheme.
+pub type AuthCredentialsHandler =
+  dyn Fn(&str, u16, &str, &str) -> Option<(String, String)> + Send + Sync;
 
 /// Policy for a CEF permission prompt or media access request.
 ///
@@ -1652,6 +1663,10 @@ impl std::fmt::Debug for CefWebviewAttributes {
         &self.shared_request_context.is_some(),
       )
       .field("proxy_bypass_list", &self.proxy_bypass_list)
+      .field(
+        "auth_credentials_handler",
+        &self.auth_credentials_handler.is_some(),
+      )
       .field("allowed_chrome_commands", &self.allowed_chrome_commands)
       .field(
         "browser_settings_callback",

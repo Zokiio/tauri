@@ -55,6 +55,7 @@ pub(crate) struct TauriCefBrowserClientHandlers<T: UserEvent> {
   pub(crate) download_handler: Option<Arc<tauri_runtime::webview::DownloadHandler>>,
   pub(crate) console_message_handler: Option<Arc<crate::ConsoleMessageHandler>>,
   pub(crate) permission_request_handler: Option<Arc<PermissionRequestHandler>>,
+  pub(crate) auth_credentials_handler: Option<Arc<crate::AuthCredentialsHandler>>,
   pub(crate) cef_permission_handler: Option<Arc<crate::CefPermissionHandler>>,
   pub(crate) cef_media_permission_handler: Option<Arc<crate::CefPermissionHandler>>,
   pub(crate) web_content_process_terminate_handler:
@@ -74,6 +75,7 @@ impl<T: UserEvent> Clone for TauriCefBrowserClientHandlers<T> {
       download_handler: self.download_handler.clone(),
       console_message_handler: self.console_message_handler.clone(),
       permission_request_handler: self.permission_request_handler.clone(),
+      auth_credentials_handler: self.auth_credentials_handler.clone(),
       cef_permission_handler: self.cef_permission_handler.clone(),
       cef_media_permission_handler: self.cef_media_permission_handler.clone(),
       web_content_process_terminate_handler: self.web_content_process_terminate_handler.clone(),
@@ -135,6 +137,7 @@ wrap_with_args! {
         request_handler::WebRequestHandlerArgs {
           navigation_handler: self.handlers.navigation_handler.clone(),
           frame_event_handler: self.handlers.frame_event_handler.clone(),
+          auth_credentials_handler: self.handlers.auth_credentials_handler.clone(),
           context: self.context.clone(),
           window_id: self.window_id,
           webview_id: self.webview_id,
@@ -165,6 +168,7 @@ wrap_with_args! {
       let new_window_handler = self.handlers.new_window_handler.clone();
       let download_handler = self.handlers.download_handler.clone();
       let permission_request_handler = self.handlers.permission_request_handler.clone();
+      let auth_credentials_handler = self.handlers.auth_credentials_handler.clone();
       let cef_permission_handler = self.handlers.cef_permission_handler.clone();
       let cef_media_permission_handler = self.handlers.cef_media_permission_handler.clone();
       let family = self.popup_family.clone();
@@ -225,6 +229,7 @@ wrap_with_args! {
             // own content.
             console_message_handler: None,
             find_result_handler: None,
+            auth_credentials_handler: auth_credentials_handler.clone(),
             cef_permission_handler: cef_permission_handler.clone(),
             cef_media_permission_handler: cef_media_permission_handler.clone(),
             ipc_handler: None,
