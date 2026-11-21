@@ -174,6 +174,9 @@ impl FrameNavigationState {
   fn apply(&self, browser_id: i32, frame_id: &str, is_main: bool, kind: &crate::FrameEventKind) {
     use crate::FrameEventKind;
 
+    if matches!(kind, FrameEventKind::FaviconChanged { .. }) {
+      return;
+    }
     let Ok(mut state) = self.state.lock() else {
       return;
     };
@@ -233,13 +236,14 @@ impl FrameNavigationState {
       FrameEventKind::NavigationStarted { .. } => {
         state.loading = true;
       }
-      FrameEventKind::LoadingStateChanged { is_loading } => {
+      FrameEventKind::LoadingStateChanged { is_loading, .. } => {
         state.observed_load_state = true;
         state.loading = *is_loading;
       }
       FrameEventKind::DocumentCommitted { .. }
       | FrameEventKind::NavigationFailed { .. }
-      | FrameEventKind::AddressChanged { .. } => {}
+      | FrameEventKind::AddressChanged { .. }
+      | FrameEventKind::FaviconChanged { .. } => {}
       FrameEventKind::RendererTerminated => {
         state.frames.clear();
         state.main_frame = None;
@@ -287,7 +291,11 @@ mod tests {
     apply(
       &barrier,
       "main",
-      Event::LoadingStateChanged { is_loading: false },
+      Event::LoadingStateChanged {
+        is_loading: false,
+        can_go_back: false,
+        can_go_forward: false,
+      },
     );
     barrier
   }
@@ -324,7 +332,11 @@ mod tests {
     apply(
       &barrier,
       "main",
-      Event::LoadingStateChanged { is_loading: false },
+      Event::LoadingStateChanged {
+        is_loading: false,
+        can_go_back: false,
+        can_go_forward: false,
+      },
     );
     assert!(!admits(&barrier, child_generation, &["main", "child-a"]));
     let loaded_generation = barrier.ready_generation().unwrap();
@@ -364,12 +376,24 @@ mod tests {
       "main",
       Event::NavigationStarted { url: url.clone() },
     );
-    apply(&barrier, "main", Event::NavigationFailed { url });
+    apply(
+      &barrier,
+      "main",
+      Event::NavigationFailed {
+        url,
+        error_code: -3,
+        error_text: String::new(),
+      },
+    );
     assert!(barrier.ready_generation().is_none());
     apply(
       &barrier,
       "main",
-      Event::LoadingStateChanged { is_loading: false },
+      Event::LoadingStateChanged {
+        is_loading: false,
+        can_go_back: false,
+        can_go_forward: false,
+      },
     );
     assert!(barrier.ready_generation().is_some());
   }
@@ -393,7 +417,11 @@ mod tests {
     apply(
       &barrier,
       "main",
-      Event::LoadingStateChanged { is_loading: false },
+      Event::LoadingStateChanged {
+        is_loading: false,
+        can_go_back: false,
+        can_go_forward: false,
+      },
     );
     assert!(barrier.ready_generation().is_none());
   }
@@ -411,7 +439,11 @@ mod tests {
       1,
       "",
       false,
-      &Event::LoadingStateChanged { is_loading: false },
+      &Event::LoadingStateChanged {
+        is_loading: false,
+        can_go_back: false,
+        can_go_forward: false,
+      },
     );
     assert!(barrier.ready_generation().is_none());
     apply(&barrier, "replacement", Event::Created);

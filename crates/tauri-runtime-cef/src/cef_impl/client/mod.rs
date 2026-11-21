@@ -18,6 +18,7 @@ mod context_menu;
 mod display;
 mod download;
 mod drag;
+mod find;
 mod frame;
 mod keyboard;
 mod life_span;
@@ -43,6 +44,7 @@ pub(crate) use process::TauriCefBrowserProcessHandler;
 
 pub(crate) struct TauriCefBrowserClientHandlers<T: UserEvent> {
   pub(crate) frame_event_handler: Option<Arc<crate::FrameEventHandler>>,
+  pub(crate) find_result_handler: Option<Arc<crate::FindResultHandler>>,
   pub(crate) ipc_handler: Option<Arc<ipc::IpcHandler<T>>>,
   pub(crate) on_page_load_handler: Option<Arc<tauri_runtime::webview::OnPageLoadHandler>>,
   pub(crate) document_title_changed_handler:
@@ -63,6 +65,7 @@ impl<T: UserEvent> Clone for TauriCefBrowserClientHandlers<T> {
   fn clone(&self) -> Self {
     Self {
       frame_event_handler: self.frame_event_handler.clone(),
+      find_result_handler: self.find_result_handler.clone(),
       ipc_handler: self.ipc_handler.clone(),
       on_page_load_handler: self.on_page_load_handler.clone(),
       document_title_changed_handler: self.document_title_changed_handler.clone(),
@@ -112,6 +115,12 @@ wrap_with_args! {
     fn frame_handler(&self) -> Option<FrameHandler> {
       self.handlers.frame_event_handler.as_ref().map(|handler| {
         frame::TauriCefFrameHandler::new(Some(handler.clone()))
+      })
+    }
+
+    fn find_handler(&self) -> Option<FindHandler> {
+      self.handlers.find_result_handler.as_ref().map(|handler| {
+        find::TauriCefFindHandler::new(handler.clone(), self.frame_navigation_state.clone())
       })
     }
 
@@ -215,6 +224,7 @@ wrap_with_args! {
             // SSO or OAuth window's URLs to an observer registered for the app's
             // own content.
             console_message_handler: None,
+            find_result_handler: None,
             cef_permission_handler: cef_permission_handler.clone(),
             cef_media_permission_handler: cef_media_permission_handler.clone(),
             ipc_handler: None,

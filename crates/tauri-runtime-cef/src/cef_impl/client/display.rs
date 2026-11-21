@@ -88,6 +88,21 @@ wrap_with_args! {
       }
     }
 
+    fn on_favicon_urlchange(
+      &self,
+      browser: Option<&mut Browser>,
+      urls: Option<&mut CefStringList>,
+    ) {
+      let mut frame = browser.as_ref().and_then(|browser| browser.main_frame());
+      let urls = urls.map(|urls| std::mem::take(urls).into_iter().collect()).unwrap_or_default();
+      crate::frame::emit_frame_event(
+        &self.frame_event_handler,
+        browser,
+        frame.as_mut(),
+        crate::FrameEventKind::FaviconChanged { urls },
+      );
+    }
+
     fn on_console_message(
       &self,
       browser: Option<&mut Browser>,

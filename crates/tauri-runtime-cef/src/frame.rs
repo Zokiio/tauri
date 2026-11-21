@@ -42,7 +42,12 @@ pub enum FrameEventKind {
   /// A document committed, before its contents begin loading.
   DocumentCommitted { url: url::Url },
   /// Navigation failed or was cancelled. This is not a document-ready signal.
-  NavigationFailed { url: url::Url },
+  NavigationFailed {
+    url: url::Url,
+    /// Chromium network error code, including `ERR_ABORTED` for cancellation.
+    error_code: i32,
+    error_text: String,
+  },
   /// An address changed, including a same-document history or fragment change.
   AddressChanged { url: url::Url },
   /// The browser assigned this frame as its main frame.
@@ -50,7 +55,13 @@ pub enum FrameEventKind {
   /// Browser-wide load state. `false` follows every frame's load-end/error
   /// notifications, including cancelled navigation. It does not assert DOM,
   /// application, network-idle, or renderer responsiveness.
-  LoadingStateChanged { is_loading: bool },
+  LoadingStateChanged {
+    is_loading: bool,
+    can_go_back: bool,
+    can_go_forward: bool,
+  },
+  /// The main document's favicon candidates in the order CEF supplied them.
+  FaviconChanged { urls: Vec<String> },
   /// The renderer terminated. Prior document generations cannot be reused.
   RendererTerminated,
 }

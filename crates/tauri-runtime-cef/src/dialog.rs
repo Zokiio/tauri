@@ -141,7 +141,11 @@ mod tests {
       crate::FrameEventKind::Created,
       crate::FrameEventKind::Attached,
       crate::FrameEventKind::MainFrameChanged,
-      crate::FrameEventKind::LoadingStateChanged { is_loading: false },
+      crate::FrameEventKind::LoadingStateChanged {
+        is_loading: false,
+        can_go_back: false,
+        can_go_forward: false,
+      },
     ] {
       browser.on_frame_event(&crate::FrameEvent {
         browser_id: 1,

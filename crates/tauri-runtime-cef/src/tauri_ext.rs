@@ -430,6 +430,10 @@ pub trait WebviewBuilderCefExt {
     handler: F,
   ) -> Self;
 
+  /// Observes find-in-page updates from this webview on the CEF UI thread.
+  #[must_use]
+  fn on_find_result<F: Fn(crate::FindResult) + Send + Sync + 'static>(self, handler: F) -> Self;
+
   /// Sets the browser runtime style.
   ///
   /// See [`RuntimeStyle`] for more information.
@@ -512,6 +516,16 @@ where
   ) -> Self {
     with_cef_webview_attributes(self.runtime_specific_attributes_mut(), |attributes| {
       attributes.cef_media_permission_handler = Some(Arc::new(handler));
+    });
+    self
+  }
+
+  fn on_find_result<F: Fn(crate::FindResult) + Send + Sync + 'static>(
+    mut self,
+    handler: F,
+  ) -> Self {
+    with_cef_webview_attributes(self.runtime_specific_attributes_mut(), |attributes| {
+      attributes.find_result_handler = Some(Arc::new(handler));
     });
     self
   }
