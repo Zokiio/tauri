@@ -131,10 +131,10 @@ impl EventSink {
       Destroyed => ("destroyed".to_string(), None),
       NavigationStarted { url } => ("navigationStarted".to_string(), Some(url.to_string())),
       DocumentCommitted { url } => ("documentCommitted".to_string(), Some(url.to_string())),
-      NavigationFailed { url } => ("navigationFailed".to_string(), Some(url.to_string())),
+      NavigationFailed { url, .. } => ("navigationFailed".to_string(), Some(url.to_string())),
       AddressChanged { url } => ("addressChanged".to_string(), Some(url.to_string())),
       MainFrameChanged => ("mainFrameChanged".to_string(), None),
-      LoadingStateChanged { is_loading } => (
+      LoadingStateChanged { is_loading, .. } => (
         if *is_loading {
           "loadingStarted".to_string()
         } else {

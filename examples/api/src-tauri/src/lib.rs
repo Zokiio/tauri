@@ -170,7 +170,7 @@ pub fn run_app<F: FnOnce(&App<TauriRuntime>) + Send + 'static>(
         // The handler runs synchronously on CEF's UI thread, so it must return
         // promptly and must not wait on an event loop operation.
         window_builder = window_builder.on_frame_event(|event| match &event.kind {
-          FrameEventKind::LoadingStateChanged { is_loading } => println!(
+          FrameEventKind::LoadingStateChanged { is_loading, .. } => println!(
             "CEF browser {} is {}",
             event.browser_id,
             if *is_loading { "loading" } else { "idle" }

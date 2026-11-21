@@ -402,6 +402,28 @@ pub enum ConsoleMessageLevel {
 /// Synchronous observer of renderer console output.
 pub type ConsoleMessageHandler = dyn Fn(ConsoleMessage) + Send + Sync + 'static;
 
+/// One find-in-page update from CEF.
+///
+/// CEF can send multiple updates for an identifier. A negative count or active
+/// match ordinal means that field did not change in this update.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct FindResult {
+  /// CEF's find session identifier.
+  pub identifier: i32,
+  /// Number of matches.
+  pub count: i32,
+  /// Rectangle of the active match, when supplied by CEF.
+  pub selection_rect: Option<cef::Rect>,
+  /// One-based ordinal of the active match.
+  pub active_match_ordinal: i32,
+  /// Whether this is the final update for the search.
+  pub final_update: bool,
+}
+
+/// Synchronous observer for find-in-page updates on the CEF UI thread.
+pub type FindResultHandler = dyn Fn(FindResult) + Send + Sync + 'static;
+
 /// Last look at a webview's [`cef::BrowserSettings`] before its browser is created.
 pub type BrowserSettingsCallback = dyn Fn(&mut cef::BrowserSettings) + Send + Sync + 'static;
 
@@ -793,6 +815,10 @@ impl<T: UserEvent> WinitCefApp<T> {
       } else {
         pending.ipc_handler.map(Arc::from)
       },
+      find_result_handler: pending
+        .runtime_specific_attributes
+        .find_result_handler
+        .take(),
       on_page_load_handler,
       document_title_changed_handler,
       navigation_handler: pending.navigation_handler.map(Arc::from),
@@ -1541,6 +1567,8 @@ pub struct CefWebviewAttributes {
   /// [`FrameNavigationState`](crate::FrameNavigationState) follows a popup's
   /// native lifecycle without exposing its URLs.
   pub frame_event_handler: Option<Arc<crate::FrameEventHandler>>,
+  /// Observer for find-in-page updates from this webview's own browser.
+  pub find_result_handler: Option<Arc<FindResultHandler>>,
   /// Observer of the messages the renderer writes to the JavaScript console.
   ///
   /// Scoped to this webview's own native browser, so neither a CEF-owned popup's
@@ -1593,6 +1621,7 @@ impl std::fmt::Debug for CefWebviewAttributes {
       .field("runtime_style", &self.runtime_style)
       .field("offscreen", &self.offscreen.is_some())
       .field("frame_event_handler", &self.frame_event_handler.is_some())
+      .field("find_result_handler", &self.find_result_handler.is_some())
       .field(
         "console_message_handler",
         &self.console_message_handler.is_some(),
