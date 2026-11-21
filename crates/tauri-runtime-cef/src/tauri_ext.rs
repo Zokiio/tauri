@@ -430,6 +430,13 @@ pub trait WebviewBuilderCefExt {
     handler: F,
   ) -> Self;
 
+  /// Uses a profile that shares storage with the supplied CEF request context.
+  ///
+  /// Webviews sharing a profile also share its preferences, content settings,
+  /// and proxy configuration.
+  #[must_use]
+  fn with_shared_request_context(self, context: cef::RequestContext) -> Self;
+
   /// Observes find-in-page updates from this webview on the CEF UI thread.
   #[must_use]
   fn on_find_result<F: Fn(crate::FindResult) + Send + Sync + 'static>(self, handler: F) -> Self;
@@ -516,6 +523,13 @@ where
   ) -> Self {
     with_cef_webview_attributes(self.runtime_specific_attributes_mut(), |attributes| {
       attributes.cef_media_permission_handler = Some(Arc::new(handler));
+    });
+    self
+  }
+
+  fn with_shared_request_context(mut self, context: cef::RequestContext) -> Self {
+    with_cef_webview_attributes(self.runtime_specific_attributes_mut(), |attributes| {
+      attributes.shared_request_context = Some(context);
     });
     self
   }
