@@ -711,6 +711,7 @@ impl<T: UserEvent> WinitCefApp<T> {
       parent_size,
       scale,
     );
+    let without_ipc = pending.webview_attributes.without_ipc;
     let devtools_enabled = context.devtools_allowed
       && (cfg!(debug_assertions) || cfg!(feature = "devtools"))
       && pending.webview_attributes.devtools.unwrap_or(true);
@@ -722,6 +723,7 @@ impl<T: UserEvent> WinitCefApp<T> {
     // accelerator just opened.
     #[cfg(any(debug_assertions, feature = "devtools"))]
     if devtools_enabled
+      && !without_ipc
       && (offscreen.is_some() || is_alloy_style(pending.runtime_specific_attributes.runtime_style))
     {
       pending.webview_attributes.initialization_scripts.push(
@@ -732,6 +734,13 @@ impl<T: UserEvent> WinitCefApp<T> {
       );
     }
 
+    if without_ipc {
+      pending
+        .blocked_app_protocols
+        .extend(pending.uri_scheme_protocols.keys().cloned());
+      pending.uri_scheme_protocols.clear();
+    }
+    let blocked_app_protocols = Arc::new(pending.blocked_app_protocols);
     let initialization_scripts = initialization_scripts(&mut pending.webview_attributes);
     let uri_scheme_protocols: Arc<HashMap<_, _>> = Arc::new(
       pending
@@ -748,7 +757,8 @@ impl<T: UserEvent> WinitCefApp<T> {
       .runtime_specific_attributes
       .allowed_chrome_commands
       .clone();
-    let drag_drop_handler_enabled = pending.webview_attributes.drag_drop_handler_enabled;
+    let drag_drop_handler_enabled =
+      !without_ipc && pending.webview_attributes.drag_drop_handler_enabled;
     let drag_drop_state = Arc::new(Mutex::new(browser_client::DragDropState::default()));
     let web_content_process_terminate_handler = pending
       .on_web_content_process_terminate_handler
@@ -778,7 +788,11 @@ impl<T: UserEvent> WinitCefApp<T> {
           handler(event);
         }
       })),
-      ipc_handler: pending.ipc_handler.map(Arc::from),
+      ipc_handler: if without_ipc {
+        None
+      } else {
+        pending.ipc_handler.map(Arc::from)
+      },
       on_page_load_handler,
       document_title_changed_handler,
       navigation_handler: pending.navigation_handler.map(Arc::from),
@@ -807,6 +821,8 @@ impl<T: UserEvent> WinitCefApp<T> {
         webview_id,
         label: pending.label.clone(),
         initial_url: Some(pending.url.as_str().to_string()),
+        without_ipc,
+        blocked_app_protocols,
         devtools_enabled,
         zoom_hotkeys_enabled,
         allowed_chrome_commands,
@@ -902,12 +918,17 @@ impl<T: UserEvent> WinitCefApp<T> {
         // Create with an inert document so the BrowserHost exists before the real
         // navigation; the real URL is loaded once the document-start script is set.
         let initial_url = CefString::from(INITIAL_LOAD_URL);
+        let mut extra_info = None;
+        if without_ipc && !crate::cef_impl::ipc::mark_without_ipc(&mut extra_info) {
+          log::error!("failed to mark CEF webview {label:?} as IPC-disabled");
+          return;
+        }
         let Some(browser) = cef::browser_host_create_browser_sync(
           Some(&window_info),
           Some(&mut client),
           Some(&initial_url),
           Some(&settings),
-          None,
+          extra_info.as_mut(),
           request_context.as_mut(),
         ) else {
           log::error!("failed to create CEF browser for webview {label:?}");

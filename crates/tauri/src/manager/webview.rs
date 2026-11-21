@@ -127,6 +127,26 @@ impl<R: Runtime> WebviewManager<R> {
   ) -> crate::Result<PendingWebview<EventLoopMessage, R>> {
     let app_manager = manager.manager();
 
+    if pending.webview_attributes.without_ipc {
+      pending
+        .blocked_app_protocols
+        .extend(self.uri_scheme_protocols.lock().unwrap().keys().cloned());
+      pending
+        .blocked_app_protocols
+        .extend(pending.uri_scheme_protocols.keys().cloned());
+      pending
+        .blocked_app_protocols
+        .extend(["tauri".into(), "ipc".into(), "asset".into()]);
+      #[cfg(feature = "isolation")]
+      if let crate::Pattern::Isolation { schema, .. } = &*app_manager.pattern {
+        pending.blocked_app_protocols.push(schema.clone());
+      }
+      pending.uri_scheme_protocols.clear();
+      pending.ipc_handler = None;
+      pending.webview_attributes.drag_drop_handler_enabled = false;
+      return Ok(pending);
+    }
+
     let plugin_init_scripts = app_manager.plugins.initialization_script();
 
     let pattern_init = PatternJavascript {
@@ -569,14 +589,18 @@ impl<R: Runtime> WebviewManager<R> {
     let label = pending.label.clone();
     pending = self.prepare_pending_webview(pending, &label, window_label, manager)?;
 
-    pending.ipc_handler = Some(crate::ipc::protocol::message_handler(
-      manager.manager_owned(),
-    ));
+    if !pending.webview_attributes.without_ipc {
+      pending.ipc_handler = Some(crate::ipc::protocol::message_handler(
+        manager.manager_owned(),
+      ));
+    }
 
     // in `windows`, we need to force a data_directory
     // but we do respect user-specification
     #[cfg(any(target_os = "linux", target_os = "windows"))]
-    if pending.webview_attributes.data_directory.is_none() {
+    if !pending.webview_attributes.without_ipc
+      && pending.webview_attributes.data_directory.is_none()
+    {
       match manager.path().app_local_data_dir() {
         Ok(user_data_dir) => pending.webview_attributes.data_directory = Some(user_data_dir),
         Err(e) => log::error!(
@@ -586,7 +610,7 @@ impl<R: Runtime> WebviewManager<R> {
     }
 
     #[cfg(all(desktop, not(target_os = "windows")))]
-    if pending.webview_attributes.zoom_hotkeys_enabled {
+    if !pending.webview_attributes.without_ipc && pending.webview_attributes.zoom_hotkeys_enabled {
       #[derive(Template)]
       #[default_template("../webview/scripts/zoom-hotkey.js")]
       struct HotkeyZoom<'a> {
@@ -790,6 +814,50 @@ fn is_local_network_url(url: &url::Url) -> bool {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn without_ipc_omits_app_scripts_and_protocols() {
+    let app = crate::test::mock_builder()
+      .register_uri_scheme_protocol("reserved", |_, _| http::Response::new(Vec::new()))
+      .build(crate::test::mock_context(crate::test::noop_assets()))
+      .unwrap();
+    let manager = &app.manager().webview;
+    let external = WebviewUrl::External("https://example.test/".parse().unwrap());
+    let pending = |label, without_ipc| {
+      let mut attributes = tauri_runtime::webview::WebviewAttributes::new(external.clone());
+      attributes.without_ipc = without_ipc;
+      manager
+        .prepare_webview(
+          &app,
+          PendingWebview::new(attributes, (), label).unwrap(),
+          "window",
+        )
+        .unwrap()
+    };
+
+    let trusted = pending("trusted", false);
+    assert!(!trusted.webview_attributes.initialization_scripts.is_empty());
+    assert!(trusted.uri_scheme_protocols.contains_key("reserved"));
+    assert!(trusted.ipc_handler.is_some());
+
+    let untrusted = pending("untrusted", true);
+    assert!(
+      untrusted
+        .webview_attributes
+        .initialization_scripts
+        .is_empty()
+    );
+    assert!(untrusted.uri_scheme_protocols.is_empty());
+    assert!(untrusted.ipc_handler.is_none());
+    for name in ["ipc", "tauri", "reserved"] {
+      assert!(
+        untrusted
+          .blocked_app_protocols
+          .iter()
+          .any(|protocol| protocol == name)
+      );
+    }
+  }
 
   #[test]
   fn local_network_url() {

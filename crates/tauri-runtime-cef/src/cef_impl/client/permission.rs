@@ -189,6 +189,7 @@ wrap_permission_handler! {
     permission_request_handler: Option<Arc<PermissionRequestHandler>>,
     cef_permission_handler: Option<Arc<CefPermissionHandler>>,
     cef_media_permission_handler: Option<Arc<CefPermissionHandler>>,
+    deny_default_grants: bool,
   }
 
   impl PermissionHandler {
@@ -236,6 +237,11 @@ wrap_permission_handler! {
             &media_content_settings(requested_permissions),
           );
           callback.cont(requested_permissions);
+          1
+        }
+        AppDecision::NoOpinion if self.deny_default_grants => {
+          let Some(callback) = callback else { return 0; };
+          callback.cont(0);
           1
         }
         AppDecision::NoOpinion => {
@@ -311,6 +317,11 @@ wrap_permission_handler! {
           // URL, so a storage-access grant Chromium scopes to an (embedded origin,
           // top-level site) pair would end up granted on every site.
           callback.cont(PermissionRequestResult::ACCEPT);
+          1
+        }
+        AppDecision::NoOpinion if self.deny_default_grants => {
+          let Some(callback) = callback else { return 0; };
+          callback.cont(PermissionRequestResult::DENY);
           1
         }
         AppDecision::NoOpinion => {

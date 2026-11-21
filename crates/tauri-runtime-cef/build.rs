@@ -13,5 +13,6 @@ fn main() {
   println!("cargo:rerun-if-env-changed=DEP_CEF_DLL_WRAPPER_CEF_DIR");
   if let Ok(cef_dir) = std::env::var("DEP_CEF_DLL_WRAPPER_CEF_DIR") {
     println!("cargo:cef_dir={cef_dir}");
+    println!("cargo:rustc-env=TAURI_CEF_TEST_DIR={cef_dir}");
   }
 }

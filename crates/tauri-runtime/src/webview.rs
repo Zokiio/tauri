@@ -249,6 +249,9 @@ pub struct PendingWebview<T: UserEvent, R: Runtime<T>> {
   /// Custom protocols to register on the webview
   pub uri_scheme_protocols: HashMap<String, Box<UriSchemeProtocolHandler>>,
 
+  /// App protocols that a webview with IPC disabled must not navigate to.
+  pub blocked_app_protocols: Vec<String>,
+
   /// How to handle IPC calls on the webview.
   pub ipc_handler: Option<WebviewIpcHandler<T, R>>,
 
@@ -294,6 +297,7 @@ impl<T: UserEvent, R: Runtime<T>> PendingWebview<T, R> {
         opener: None,
         runtime_specific_attributes,
         uri_scheme_protocols: Default::default(),
+        blocked_app_protocols: Vec::new(),
         label,
         ipc_handler: None,
         navigation_handler: None,
@@ -379,6 +383,8 @@ impl<T: UserEvent, R: Runtime<T>> PartialEq for DetachedWebview<T, R> {
 pub struct WebviewAttributes {
   pub url: WebviewUrl,
   pub user_agent: Option<String>,
+  /// Whether to omit the Tauri JavaScript IPC bridge and app protocols.
+  pub without_ipc: bool,
   /// A list of initialization javascript scripts to run when loading new pages.
   /// When webview load a new page, this initialization code will be executed.
   /// It is guaranteed that code is executed before `window.onload`.
@@ -539,6 +545,7 @@ impl WebviewAttributes {
     Self {
       url,
       user_agent: None,
+      without_ipc: false,
       initialization_scripts: Vec::new(),
       data_directory: None,
       drag_drop_handler_enabled: true,

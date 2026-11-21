@@ -87,6 +87,7 @@ wrap_with_args! {
     context: RuntimeContext<T>,
     new_window_handler: Option<Arc<tauri_runtime::webview::NewWindowHandler<T, CefRuntime<T>>>>,
     initial_url: Option<String>,
+    without_ipc: bool,
     frame_navigation_state: crate::FrameNavigationState,
     popup_family: Weak<crate::popup::PopupFamily>,
     opener: Option<crate::popup::PopupRequest>,
@@ -126,7 +127,7 @@ wrap_with_args! {
       window_info: Option<&mut WindowInfo>,
       client: Option<&mut Option<Client>>,
       _settings: Option<&mut BrowserSettings>,
-      _extra_info: Option<&mut Option<DictionaryValue>>,
+      extra_info: Option<&mut Option<DictionaryValue>>,
       _no_javascript_access: Option<&mut i32>,
     ) -> std::os::raw::c_int {
       // A frame left without `window.ipc`, or nested in one, opens no popup. A popup has no
@@ -163,6 +164,9 @@ wrap_with_args! {
       } else { tauri_runtime::webview::NewWindowResponse::Allow };
       match response {
         tauri_runtime::webview::NewWindowResponse::Allow => {
+          if self.without_ipc && !extra_info.is_some_and(crate::cef_impl::ipc::mark_without_ipc) {
+            return 1;
+          }
           let (Some(browser), Some(client), Some(family)) =
             (browser, client, self.popup_family.upgrade()) else { return 1; };
           let Some(request) = family.reserve(&self.frame_navigation_state, browser.identifier(), popup_id) else { return 1; };
@@ -178,6 +182,9 @@ wrap_with_args! {
           0
         },
         tauri_runtime::webview::NewWindowResponse::Create { window_id } => {
+          if self.without_ipc {
+            return 1;
+          }
           // CEF cannot transplant a popup's contents into an existing
           // browser, so cancel the popup and navigate the designated
           // window's first webview to the URL instead — the closest
@@ -190,6 +197,22 @@ wrap_with_args! {
           1
         }
         tauri_runtime::webview::NewWindowResponse::Deny => 1,
+      }
+    }
+
+    fn on_before_dev_tools_popup(
+      &self,
+      _browser: Option<&mut Browser>,
+      _window_info: Option<&mut WindowInfo>,
+      _client: Option<&mut Option<Client>>,
+      _settings: Option<&mut BrowserSettings>,
+      extra_info: Option<&mut Option<DictionaryValue>>,
+      _use_default_window: Option<&mut std::os::raw::c_int>,
+    ) {
+      if self.without_ipc
+        && !extra_info.is_some_and(crate::cef_impl::ipc::mark_without_ipc)
+      {
+        log::error!("could not set IPC metadata on the CEF DevTools frontend");
       }
     }
 

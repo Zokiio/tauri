@@ -4,6 +4,8 @@
 
 use std::sync::{Arc, Mutex, OnceLock};
 
+use std::collections::HashMap;
+
 use cef::*;
 use tauri_runtime::{UserEvent, webview::DetachedWebview};
 
@@ -217,16 +219,86 @@ fn install_ipc_post_message(context: Option<&mut V8Context>) {
   window.set_value_bykey(Some(&CefString::from("ipc")), Some(&mut ipc), attributes);
 }
 
+// The standalone macOS helper mirrors this key and browser tracking.
+const WITHOUT_IPC_KEY: &str = "tauri_without_ipc";
+
+#[derive(Default)]
+struct IpcDisabledBrowsers(HashMap<i32, usize>);
+
+impl IpcDisabledBrowsers {
+  fn created(&mut self, id: i32, extra_info: Option<&DictionaryValue>) {
+    let key = CefString::from(WITHOUT_IPC_KEY);
+    let marked = extra_info.is_some_and(|info| info.bool(Some(&key)) != 0);
+    // During a cross-origin transition, a replacement with the same ID can
+    // arrive before CEF destroys the old renderer-side browser.
+    if self.0.contains_key(&id) || marked {
+      *self.0.entry(id).or_default() += 1;
+    }
+  }
+
+  fn destroyed(&mut self, id: i32) {
+    if let std::collections::hash_map::Entry::Occupied(mut entry) = self.0.entry(id) {
+      *entry.get_mut() -= 1;
+      if *entry.get() == 0 {
+        entry.remove();
+      }
+    }
+  }
+
+  fn contains(&self, id: i32) -> bool {
+    self.0.contains_key(&id)
+  }
+}
+
+fn ipc_disabled_browsers() -> &'static Mutex<IpcDisabledBrowsers> {
+  static BROWSERS: OnceLock<Mutex<IpcDisabledBrowsers>> = OnceLock::new();
+  BROWSERS.get_or_init(Mutex::default)
+}
+
+/// Marks a new browser or popup without mutating any read-only CEF metadata.
+pub(crate) fn mark_without_ipc(slot: &mut Option<DictionaryValue>) -> bool {
+  let Some(info) = slot
+    .as_ref()
+    .map_or_else(dictionary_value_create, |info| info.copy(0))
+  else {
+    return false;
+  };
+  if info.set_bool(Some(&CefString::from(WITHOUT_IPC_KEY)), 1) == 0 {
+    return false;
+  }
+  *slot = Some(info);
+  true
+}
+
 wrap_render_process_handler! {
   pub struct TauriRenderProcessHandler;
 
   impl RenderProcessHandler {
+    fn on_browser_created(
+      &self,
+      browser: Option<&mut Browser>,
+      extra_info: Option<&mut DictionaryValue>,
+    ) {
+      if let Some(browser) = browser {
+        ipc_disabled_browsers().lock().unwrap().created(browser.identifier(), extra_info.as_deref());
+      }
+    }
+
+    fn on_browser_destroyed(&self, browser: Option<&mut Browser>) {
+      if let Some(browser) = browser {
+        ipc_disabled_browsers().lock().unwrap().destroyed(browser.identifier());
+      }
+    }
+
     fn on_context_created(
       &self,
-      _browser: Option<&mut Browser>,
+      browser: Option<&mut Browser>,
       frame: Option<&mut Frame>,
       context: Option<&mut V8Context>,
     ) {
+      if browser.is_none_or(|browser| ipc_disabled_browsers().lock().unwrap().contains(browser.identifier())) {
+        return;
+      }
       let hosts = frame_hosts_without_ipc();
       if !hosts.is_empty() && frame.is_some_and(|frame| frame_without_ipc(frame, hosts)) {
         return;
@@ -483,5 +555,43 @@ mod tests {
     assert!(!url_on_hosts("http://apps.localhost.evil/", &hosts));
     assert!(!url_on_hosts("about:blank", &hosts));
     assert!(!url_on_hosts("http://apps.localhost/", &[]));
+  }
+}
+
+#[cfg(test)]
+mod without_ipc_tests {
+  use super::*;
+
+  #[test]
+  fn browser_and_popup_metadata_disable_ipc_and_preserve_other_fields() {
+    crate::initialize_cef_test_api();
+    let mut root = None;
+    assert!(mark_without_ipc(&mut root));
+    let mut popup = dictionary_value_create();
+    assert_ne!(
+      popup
+        .as_ref()
+        .unwrap()
+        .set_int(Some(&"unrelated".into()), 42),
+      0
+    );
+    assert!(mark_without_ipc(&mut popup));
+    assert_eq!(popup.as_ref().unwrap().int(Some(&"unrelated".into())), 42);
+
+    let mut browsers = IpcDisabledBrowsers::default();
+    browsers.created(1, root.as_ref());
+    browsers.created(2, popup.as_ref());
+    browsers.created(3, None);
+    assert!(browsers.contains(1));
+    assert!(browsers.contains(2));
+    assert!(!browsers.contains(3));
+
+    // CEF can create the same browser ID again before its old instance goes away.
+    browsers.created(1, root.as_ref());
+    browsers.destroyed(1);
+    assert!(browsers.contains(1));
+    browsers.destroyed(1);
+    assert!(!browsers.contains(1));
+    assert!(browsers.contains(2));
   }
 }
