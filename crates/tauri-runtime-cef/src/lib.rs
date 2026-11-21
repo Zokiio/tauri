@@ -52,3 +52,25 @@ pub use tauri_macros::cef_entry_point;
 pub use webview::*;
 pub use window::{CefWindowDispatcher, NativeWindowToken};
 pub use window_builder::WindowBuilderWrapper;
+
+#[cfg(test)]
+fn initialize_cef_test_api() {
+  static INITIALIZED: std::sync::Once = std::sync::Once::new();
+  INITIALIZED.call_once(|| {
+    #[cfg(target_os = "macos")]
+    {
+      use std::{ffi::CString, os::unix::ffi::OsStrExt, path::Path};
+
+      let framework = Path::new(option_env!("TAURI_CEF_TEST_DIR").expect("CEF distribution"))
+        .join("Chromium Embedded Framework.framework/Chromium Embedded Framework");
+      let path = CString::new(framework.as_os_str().as_bytes()).unwrap();
+      assert_eq!(
+        cef::load_library(Some(unsafe { &*path.as_ptr() })),
+        1,
+        "load {}",
+        framework.display()
+      );
+    }
+    assert!(!cef::api_hash(cef::sys::CEF_API_VERSION_LAST, 0).is_null());
+  });
+}

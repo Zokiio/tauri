@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-License-Identifier: MIT
 
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+
 use cef::{args::Args, *};
 
 const IPC_MESSAGE_NAME: &str = "tauri:ipc";
@@ -162,16 +165,71 @@ fn install_ipc_post_message(context: Option<&mut V8Context>) {
   window.set_value_bykey(Some(&CefString::from("ipc")), Some(&mut ipc), attributes);
 }
 
+// The standalone macOS helper mirrors this key and browser tracking.
+const WITHOUT_IPC_KEY: &str = "tauri_without_ipc";
+
+#[derive(Default)]
+struct IpcDisabledBrowsers(HashMap<i32, usize>);
+
+impl IpcDisabledBrowsers {
+  fn created(&mut self, id: i32, extra_info: Option<&DictionaryValue>) {
+    let key = CefString::from(WITHOUT_IPC_KEY);
+    let marked = extra_info.is_some_and(|info| info.bool(Some(&key)) != 0);
+    // During a cross-origin transition, a replacement with the same ID can
+    // arrive before CEF destroys the old renderer-side browser.
+    if self.0.contains_key(&id) || marked {
+      *self.0.entry(id).or_default() += 1;
+    }
+  }
+
+  fn destroyed(&mut self, id: i32) {
+    if let std::collections::hash_map::Entry::Occupied(mut entry) = self.0.entry(id) {
+      *entry.get_mut() -= 1;
+      if *entry.get() == 0 {
+        entry.remove();
+      }
+    }
+  }
+
+  fn contains(&self, id: i32) -> bool {
+    self.0.contains_key(&id)
+  }
+}
+
+fn ipc_disabled_browsers() -> &'static Mutex<IpcDisabledBrowsers> {
+  static BROWSERS: OnceLock<Mutex<IpcDisabledBrowsers>> = OnceLock::new();
+  BROWSERS.get_or_init(Mutex::default)
+}
+
 wrap_render_process_handler! {
   struct TauriRenderProcessHandler;
 
   impl RenderProcessHandler {
+    fn on_browser_created(
+      &self,
+      browser: Option<&mut Browser>,
+      extra_info: Option<&mut DictionaryValue>,
+    ) {
+      if let Some(browser) = browser {
+        ipc_disabled_browsers().lock().unwrap().created(browser.identifier(), extra_info.as_deref());
+      }
+    }
+
+    fn on_browser_destroyed(&self, browser: Option<&mut Browser>) {
+      if let Some(browser) = browser {
+        ipc_disabled_browsers().lock().unwrap().destroyed(browser.identifier());
+      }
+    }
+
     fn on_context_created(
       &self,
-      _browser: Option<&mut Browser>,
+      browser: Option<&mut Browser>,
       frame: Option<&mut Frame>,
       context: Option<&mut V8Context>,
     ) {
+      if browser.is_none_or(|browser| ipc_disabled_browsers().lock().unwrap().contains(browser.identifier())) {
+        return;
+      }
       let hosts = frame_hosts_without_ipc();
       if !hosts.is_empty() && frame.is_some_and(|frame| frame_without_ipc(frame, hosts)) {
         return;

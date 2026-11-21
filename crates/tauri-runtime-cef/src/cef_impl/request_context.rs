@@ -327,7 +327,10 @@ pub(crate) fn request_context_from_webview_attributes<'a>(
     CefStringUtf16::from(cache_path.to_string_lossy().as_ref())
   };
 
-  let cache_path = if webview_attributes.incognito {
+  let own_incognito = webview_attributes.without_ipc
+    && webview_attributes.data_directory.is_none()
+    && webview_attributes.data_store_identifier.is_none();
+  let cache_path = if webview_attributes.incognito || own_incognito {
     CefStringUtf16::from("")
   } else if let Some(data_directory) = &webview_attributes.data_directory {
     own_cache_path(resolve_request_context_cache_path(
@@ -382,7 +385,9 @@ pub(crate) fn request_context_from_webview_attributes<'a>(
   let request_context = request_context_create_context(Some(&settings), Some(&mut handler));
   *rc_holder.lock().unwrap() = request_context.clone();
 
-  if let Some(request_context) = request_context.as_ref() {
+  if !webview_attributes.without_ipc
+    && let Some(request_context) = request_context.as_ref()
+  {
     for scheme in custom_schemes {
       request_context.register_scheme_handler_factory(
         Some(&custom_protocol_scheme.into()),

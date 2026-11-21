@@ -87,6 +87,8 @@ wrap_with_args! {
     pub(crate) webview_id: u32,
     pub(crate) label: String,
     initial_url: Option<String>,
+    without_ipc: bool,
+    blocked_app_protocols: Arc<Vec<String>>,
     devtools_enabled: bool,
     zoom_hotkeys_enabled: bool,
     allowed_chrome_commands: Vec<crate::ChromeCommandGroup>,
@@ -133,6 +135,8 @@ wrap_with_args! {
           web_content_process_terminate_handler:
             self.handlers.web_content_process_terminate_handler.clone(),
           certificate_errors: self.context.certificate_errors,
+          without_ipc: self.without_ipc,
+          blocked_app_protocols: self.blocked_app_protocols.clone(),
         },
       ))
     }
@@ -155,6 +159,8 @@ wrap_with_args! {
       let cef_permission_handler = self.handlers.cef_permission_handler.clone();
       let cef_media_permission_handler = self.handlers.cef_media_permission_handler.clone();
       let family = self.popup_family.clone();
+      let without_ipc = self.without_ipc;
+      let blocked_app_protocols = self.blocked_app_protocols.clone();
       let create_popup: Arc<life_span::PopupClientFactory> = Arc::new(move |opener, state| {
         let events = state.clone();
         TauriCefBrowserClient::build(TauriCefBrowserClientArgs {
@@ -163,6 +169,8 @@ wrap_with_args! {
           webview_id,
           label: label.clone(),
           initial_url: None,
+          without_ipc,
+          blocked_app_protocols: blocked_app_protocols.clone(),
           devtools_enabled,
           zoom_hotkeys_enabled,
           allowed_chrome_commands: allowed_chrome_commands.clone(),
@@ -224,6 +232,7 @@ wrap_with_args! {
         context: self.context.clone(),
         new_window_handler: self.handlers.new_window_handler.clone(),
         initial_url: self.initial_url.clone(),
+        without_ipc,
         frame_navigation_state: self.frame_navigation_state.clone(),
         popup_family: self.popup_family.clone(),
         opener: self.opener.clone(),
@@ -282,6 +291,7 @@ wrap_with_args! {
         self.handlers.permission_request_handler.clone(),
         self.handlers.cef_permission_handler.clone(),
         self.handlers.cef_media_permission_handler.clone(),
+        self.without_ipc,
       ))
     }
 
@@ -293,7 +303,7 @@ wrap_with_args! {
       message: Option<&mut ProcessMessage>,
     ) -> std::os::raw::c_int {
       // A CEF popup (including DevTools) never inherits the root IPC identity.
-      if self.opener.is_some() || browser.as_ref().is_none_or(|browser| browser.is_popup() != 0 || !self.frame_navigation_state.has_browser_id(browser.identifier())) { return 0; }
+      if self.without_ipc || self.opener.is_some() || browser.as_ref().is_none_or(|browser| browser.is_popup() != 0 || !self.frame_navigation_state.has_browser_id(browser.identifier())) { return 0; }
       ipc::on_process_message_received(self, frame, source_process, message)
     }
   }

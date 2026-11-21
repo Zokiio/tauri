@@ -1099,6 +1099,18 @@ fn main() {
     self
   }
 
+  /// Omits the Tauri IPC bridge and app protocols from this webview.
+  ///
+  /// On CEF this also removes the native bridge from every frame and any
+  /// allowed popup. Use a dedicated data directory if this webview needs
+  /// persistent storage. Its context must not share storage with a trusted
+  /// webview that serves app protocols.
+  #[must_use]
+  pub fn without_ipc(mut self) -> Self {
+    self.webview_attributes.without_ipc = true;
+    self
+  }
+
   /// Enable or disable incognito mode for the WebView.
   ///
   ///  ## Platform-specific:

@@ -165,6 +165,24 @@ fn keep_encoding_declaration_first(document: &NodeRef, head: &NodeRef) {
   }
 }
 
+fn is_app_protocol_url(url: &Url, protocols: &[String]) -> bool {
+  if matches!(url.scheme(), "http" | "https") {
+    url
+      .host_str()
+      .map(|host| host.trim_end_matches('.'))
+      .and_then(|host| host.strip_suffix(".localhost"))
+      .is_some_and(|scheme| {
+        protocols
+          .iter()
+          .any(|name| name.eq_ignore_ascii_case(scheme))
+      })
+  } else {
+    protocols
+      .iter()
+      .any(|name| name.eq_ignore_ascii_case(url.scheme()))
+  }
+}
+
 wrap_with_args! {
   wrap_request_handler => WebRequestHandlerArgs;
 
@@ -179,6 +197,8 @@ wrap_with_args! {
     drag_drop_state: Arc<Mutex<DragDropState>>,
     web_content_process_terminate_handler: Option<Arc<tauri_runtime::webview::OnWebContentProcessTerminateHandler>>,
     certificate_errors: crate::CertificateErrorPolicy,
+    without_ipc: bool,
+    blocked_app_protocols: Arc<Vec<String>>,
   }
 
   impl RequestHandler {
@@ -259,6 +279,12 @@ wrap_with_args! {
       let Ok(url) = url::Url::parse(&url_str) else {
         return 0;
       };
+
+      if self.without_ipc
+        && is_app_protocol_url(&url, &self.blocked_app_protocols)
+      {
+        return 1;
+      }
 
       // A frame on a host left without `window.ipc` stays on those hosts, so its document
       // cannot navigate it to one it wrote (`data:`, `blob:`), which would get the bridge.
@@ -764,6 +790,30 @@ mod termination_tests {
       (TerminationStatus::NUM_VALUES, Reason::Unknown),
     ] {
       assert_eq!(termination_reason(status), expected);
+    }
+  }
+}
+
+#[cfg(test)]
+mod app_protocol_tests {
+  use super::*;
+
+  #[test]
+  fn blocks_app_protocol_hosts_without_blocking_loopback_servers() {
+    let names = ["ipc".to_owned(), "gups-plugin".to_owned()];
+    for url in [
+      "http://ipc.localhost/shell_info",
+      "https://GUPS-plugin.localhost.:4200/",
+      "gups-plugin://localhost/path",
+    ] {
+      assert!(is_app_protocol_url(&url.parse().unwrap(), &names), "{url}");
+    }
+    for url in [
+      "http://localhost:4200",
+      "http://127.0.0.1:4200",
+      "http://ipc.localhost.example/",
+    ] {
+      assert!(!is_app_protocol_url(&url.parse().unwrap(), &names), "{url}");
     }
   }
 }
