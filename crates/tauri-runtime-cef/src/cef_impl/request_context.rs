@@ -277,46 +277,10 @@ fn apply_proxy(request_context: &RequestContext, proxy_url: &url::Url) {
   }
 }
 
-/// Creates a per-webview [`RequestContext`], registers Tauri's custom URI
-/// scheme handler factories on it, and arranges for `on_initialized` to fire
-/// once the underlying Chromium `Profile` is fully created.
-///
-/// CEF only synchronously initializes the request context when its `cache_path`
-/// equals `Settings.root_cache_path` (it then reuses the global "Default"
-/// profile via `GetPrimaryUserProfile()`) or when the cache_path is empty
-/// (off-the-record profile). Any other path (notably the per-`data_directory`
-/// case used by Tauri) takes `ChromeBrowserContext::InitializeAsync`'s
-/// `CreateProfileAsync` branch which finishes asynchronously. Calling
-/// `browser_host_create_browser_sync` synchronously after
-/// `request_context_create_context` would then fail
-/// `CefRequestContextImpl::VerifyBrowserContext()` and return a null browser.
-///
-/// Routing browser creation through `on_initialized` keeps a single code path
-/// for every cache_path layout: CEF always dispatches the callback through
-/// `CEF_POST_TASK(CEF_UIT, ...)`, so even the synchronous-init cases are
-/// handled by the same continuation.
-///
-/// Scheme handler factories are registered here, synchronously after
-/// `request_context_create_context` returns, and *before* the
-/// `OnRequestContextInitialized` task that drives browser creation is
-/// dispatched. `RegisterSchemeHandlerFactory` internally queues its work
-/// behind the request context's initialization (`StoreOrTriggerInitCallback`
-/// when the browser context is not yet initialized, or an immediate UI -> IO
-/// hop otherwise), so by the time the browser finally issues its first
-/// navigation against any of these schemes the factories have been wired up
-/// on the IO thread.
-pub(crate) fn request_context_from_webview_attributes<'a>(
+fn request_context_settings(
   global_cache_path: &Path,
   webview_attributes: &WebviewAttributes,
-  profile_preferences: Arc<Vec<(String, serde_json::Value)>>,
-  content_settings: Arc<Vec<(ContentSettingTypes, ContentSettingValues)>>,
-  custom_schemes: impl IntoIterator<Item = &'a String>,
-  custom_protocol_scheme: &str,
-  scheme_registry: request_handler::SchemeRegistry,
-  main_thread: request_handler::MainThreadDispatcher,
-  frame_hosts_without_ipc: Arc<Vec<String>>,
-  on_initialized: RequestContextInitContinuation,
-) -> Option<RequestContext> {
+) -> RequestContextSettings {
   let own_cache_path = |cache_path: PathBuf| {
     if let Err(error) = create_dir_all(&cache_path) {
       log::error!(
@@ -351,11 +315,88 @@ pub(crate) fn request_context_from_webview_attributes<'a>(
     (&global_context.cache_path()).into()
   };
 
-  let settings = RequestContextSettings {
+  RequestContextSettings {
     cache_path,
     ..Default::default()
-  };
+  }
+}
 
+fn create_webview_request_context(
+  global_cache_path: &Path,
+  attributes: &WebviewAttributes,
+  shared: Option<RequestContext>,
+  handler: &mut RequestContextHandler,
+) -> Option<RequestContext> {
+  if let Some(mut shared) = shared {
+    let is_incognito = CefString::from(&shared.cache_path()).to_string().is_empty();
+    let shares_global = attributes.without_ipc
+      && request_context_get_global_context()
+        .is_some_and(|global| global.is_sharing_with(Some(&mut shared)) != 0);
+    if let Err(reason) = validate_shared_context(attributes, is_incognito, shares_global) {
+      log::error!("{reason}");
+      return None;
+    }
+    return request_context_cef_create_context_shared(Some(&mut shared), Some(handler));
+  }
+  let settings = request_context_settings(global_cache_path, attributes);
+  request_context_create_context(Some(&settings), Some(handler))
+}
+
+fn validate_shared_context(
+  attributes: &WebviewAttributes,
+  is_incognito: bool,
+  shares_global: bool,
+) -> Result<(), &'static str> {
+  if attributes.incognito && !is_incognito {
+    return Err("an incognito webview requires an incognito CEF request context");
+  }
+  if attributes.without_ipc && shares_global {
+    return Err("a webview with IPC disabled cannot share the global CEF request context");
+  }
+  Ok(())
+}
+
+/// Creates a per-webview [`RequestContext`], registers Tauri's custom URI
+/// scheme handler factories on it, and arranges for `on_initialized` to fire
+/// once the underlying Chromium `Profile` is fully created.
+///
+/// CEF only synchronously initializes the request context when its `cache_path`
+/// equals `Settings.root_cache_path` (it then reuses the global "Default"
+/// profile via `GetPrimaryUserProfile()`) or when the cache_path is empty
+/// (off-the-record profile). Any other path (notably the per-`data_directory`
+/// case used by Tauri) takes `ChromeBrowserContext::InitializeAsync`'s
+/// `CreateProfileAsync` branch which finishes asynchronously. Calling
+/// `browser_host_create_browser_sync` synchronously after
+/// `request_context_create_context` would then fail
+/// `CefRequestContextImpl::VerifyBrowserContext()` and return a null browser.
+///
+/// Routing browser creation through `on_initialized` keeps a single code path
+/// for every cache_path layout: CEF always dispatches the callback through
+/// `CEF_POST_TASK(CEF_UIT, ...)`, so even the synchronous-init cases are
+/// handled by the same continuation.
+///
+/// Scheme handler factories are registered here, synchronously after
+/// `request_context_create_context` returns, and *before* the
+/// `OnRequestContextInitialized` task that drives browser creation is
+/// dispatched. `RegisterSchemeHandlerFactory` internally queues its work
+/// behind the request context's initialization (`StoreOrTriggerInitCallback`
+/// when the browser context is not yet initialized, or an immediate UI -> IO
+/// hop otherwise), so by the time the browser finally issues its first
+/// navigation against any of these schemes the factories have been wired up
+/// on the IO thread.
+pub(crate) fn request_context_from_webview_attributes<'a>(
+  global_cache_path: &Path,
+  webview_attributes: &WebviewAttributes,
+  shared_request_context: Option<RequestContext>,
+  profile_preferences: Arc<Vec<(String, serde_json::Value)>>,
+  content_settings: Arc<Vec<(ContentSettingTypes, ContentSettingValues)>>,
+  custom_schemes: impl IntoIterator<Item = &'a String>,
+  custom_protocol_scheme: &str,
+  scheme_registry: request_handler::SchemeRegistry,
+  main_thread: request_handler::MainThreadDispatcher,
+  frame_hosts_without_ipc: Arc<Vec<String>>,
+  on_initialized: RequestContextInitContinuation,
+) -> Option<RequestContext> {
   // Holds a strong reference to the `RequestContext` until the
   // `on_request_context_initialized` callback fires. CEF keeps the underlying
   // C++ `CefRequestContextImpl` alive during async profile creation through
@@ -382,7 +423,12 @@ pub(crate) fn request_context_from_webview_attributes<'a>(
   });
 
   let mut handler = WebviewRequestContextHandler::new(Arc::new(Mutex::new(Some(wrapped_callback))));
-  let request_context = request_context_create_context(Some(&settings), Some(&mut handler));
+  let request_context = create_webview_request_context(
+    global_cache_path,
+    webview_attributes,
+    shared_request_context,
+    &mut handler,
+  );
   *rc_holder.lock().unwrap() = request_context.clone();
 
   if !webview_attributes.without_ipc
@@ -407,7 +453,22 @@ pub(crate) fn request_context_from_webview_attributes<'a>(
 
 #[cfg(test)]
 mod data_store_tests {
-  use super::data_store_directory_name;
+  use super::*;
+
+  #[test]
+  fn incognito_webviews_can_share_only_an_off_the_record_profile() {
+    let mut attributes = WebviewAttributes::new(tauri_utils::config::WebviewUrl::External(
+      "https://example.test/".parse().unwrap(),
+    ))
+    .incognito(true);
+
+    assert!(validate_shared_context(&attributes, true, false).is_ok());
+    assert!(validate_shared_context(&attributes, false, false).is_err());
+
+    attributes.without_ipc = true;
+    assert!(validate_shared_context(&attributes, true, true).is_err());
+    assert!(validate_shared_context(&attributes, true, false).is_ok());
+  }
 
   #[test]
   fn a_data_store_identifier_names_a_uuid_shaped_directory() {

@@ -1040,6 +1040,10 @@ impl<T: UserEvent> WinitCefApp<T> {
     let request_context = request_context::request_context_from_webview_attributes(
       &context.cache_path,
       &pending.webview_attributes,
+      pending
+        .runtime_specific_attributes
+        .shared_request_context
+        .take(),
       context.profile_preferences.clone(),
       context.content_settings.clone(),
       uri_scheme_protocols.keys(),
@@ -1583,6 +1587,12 @@ pub struct CefWebviewAttributes {
   ///
   /// Takes precedence over the portable permission handler and Alloy defaults.
   pub cef_media_permission_handler: Option<Arc<CefPermissionHandler>>,
+  /// Profile whose storage the webview shares. Takes precedence over data directory
+  /// and data store identifier. An incognito webview requires an incognito context.
+  ///
+  /// Use a profile dedicated to untrusted content with `without_ipc` and keep it
+  /// separate from profiles that register app protocols.
+  pub shared_request_context: Option<cef::RequestContext>,
   /// Families of Chrome commands this webview keeps rather than swallows.
   ///
   /// Empty by default, which blocks every group in [`ChromeCommandGroup`].
@@ -1633,6 +1643,10 @@ impl std::fmt::Debug for CefWebviewAttributes {
       .field(
         "cef_media_permission_handler",
         &self.cef_media_permission_handler.is_some(),
+      )
+      .field(
+        "shared_request_context",
+        &self.shared_request_context.is_some(),
       )
       .field("allowed_chrome_commands", &self.allowed_chrome_commands)
       .field(
