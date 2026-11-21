@@ -441,6 +441,17 @@ pub trait WebviewBuilderCefExt {
   #[must_use]
   fn proxy_bypass_list(self, bypass_list: impl Into<String>) -> Self;
 
+  /// Handles proxy challenges. The app must launch CEF with
+  /// `disable-chrome-login-prompt` for native browser requests to reach this callback.
+  /// Worker requests without a browser can reuse cached credentials from the profile.
+  #[must_use]
+  fn on_auth_credentials<
+    F: Fn(&str, u16, &str, &str) -> Option<(String, String)> + Send + Sync + 'static,
+  >(
+    self,
+    handler: F,
+  ) -> Self;
+
   /// Observes find-in-page updates from this webview on the CEF UI thread.
   #[must_use]
   fn on_find_result<F: Fn(crate::FindResult) + Send + Sync + 'static>(self, handler: F) -> Self;
@@ -541,6 +552,18 @@ where
   fn proxy_bypass_list(mut self, bypass_list: impl Into<String>) -> Self {
     with_cef_webview_attributes(self.runtime_specific_attributes_mut(), |attributes| {
       attributes.proxy_bypass_list = Some(bypass_list.into());
+    });
+    self
+  }
+
+  fn on_auth_credentials<
+    F: Fn(&str, u16, &str, &str) -> Option<(String, String)> + Send + Sync + 'static,
+  >(
+    mut self,
+    handler: F,
+  ) -> Self {
+    with_cef_webview_attributes(self.runtime_specific_attributes_mut(), |attributes| {
+      attributes.auth_credentials_handler = Some(Arc::new(handler));
     });
     self
   }
