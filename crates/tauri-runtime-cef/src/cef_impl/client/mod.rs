@@ -53,6 +53,8 @@ pub(crate) struct TauriCefBrowserClientHandlers<T: UserEvent> {
   pub(crate) download_handler: Option<Arc<tauri_runtime::webview::DownloadHandler>>,
   pub(crate) console_message_handler: Option<Arc<crate::ConsoleMessageHandler>>,
   pub(crate) permission_request_handler: Option<Arc<PermissionRequestHandler>>,
+  pub(crate) cef_permission_handler: Option<Arc<crate::CefPermissionHandler>>,
+  pub(crate) cef_media_permission_handler: Option<Arc<crate::CefPermissionHandler>>,
   pub(crate) web_content_process_terminate_handler:
     Option<Arc<tauri_runtime::webview::OnWebContentProcessTerminateHandler>>,
 }
@@ -69,6 +71,8 @@ impl<T: UserEvent> Clone for TauriCefBrowserClientHandlers<T> {
       download_handler: self.download_handler.clone(),
       console_message_handler: self.console_message_handler.clone(),
       permission_request_handler: self.permission_request_handler.clone(),
+      cef_permission_handler: self.cef_permission_handler.clone(),
+      cef_media_permission_handler: self.cef_media_permission_handler.clone(),
       web_content_process_terminate_handler: self.web_content_process_terminate_handler.clone(),
     }
   }
@@ -148,6 +152,8 @@ wrap_with_args! {
       let new_window_handler = self.handlers.new_window_handler.clone();
       let download_handler = self.handlers.download_handler.clone();
       let permission_request_handler = self.handlers.permission_request_handler.clone();
+      let cef_permission_handler = self.handlers.cef_permission_handler.clone();
+      let cef_media_permission_handler = self.handlers.cef_media_permission_handler.clone();
       let family = self.popup_family.clone();
       let create_popup: Arc<life_span::PopupClientFactory> = Arc::new(move |opener, state| {
         let events = state.clone();
@@ -201,6 +207,8 @@ wrap_with_args! {
             // SSO or OAuth window's URLs to an observer registered for the app's
             // own content.
             console_message_handler: None,
+            cef_permission_handler: cef_permission_handler.clone(),
+            cef_media_permission_handler: cef_media_permission_handler.clone(),
             ipc_handler: None,
             on_page_load_handler: None,
             document_title_changed_handler: None,
@@ -272,6 +280,8 @@ wrap_with_args! {
     fn permission_handler(&self) -> Option<PermissionHandler> {
       Some(TauriCefPermissionHandler::new(
         self.handlers.permission_request_handler.clone(),
+        self.handlers.cef_permission_handler.clone(),
+        self.handlers.cef_media_permission_handler.clone(),
       ))
     }
 

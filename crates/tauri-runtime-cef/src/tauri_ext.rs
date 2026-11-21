@@ -412,6 +412,24 @@ where
 /// CEF-specific APIs of [`tauri::webview::WebviewBuilder`].
 #[cfg(feature = "unstable")]
 pub trait WebviewBuilderCefExt {
+  /// Sets the policy for raw CEF permission prompts on the CEF UI thread.
+  #[must_use]
+  fn on_cef_permission_request<
+    F: Fn(&str, u32) -> crate::CefPermissionDecision + Send + Sync + 'static,
+  >(
+    self,
+    handler: F,
+  ) -> Self;
+
+  /// Sets the policy for raw CEF media capture requests on the CEF UI thread.
+  #[must_use]
+  fn on_cef_media_permission_request<
+    F: Fn(&str, u32) -> crate::CefPermissionDecision + Send + Sync + 'static,
+  >(
+    self,
+    handler: F,
+  ) -> Self;
+
   /// Sets the browser runtime style.
   ///
   /// See [`RuntimeStyle`] for more information.
@@ -474,6 +492,30 @@ impl<R: Runtime> WebviewBuilderCefExt for tauri::webview::WebviewBuilder<R>
 where
   R::RuntimeWebviewAttributes: AsCefWebviewAttributes,
 {
+  fn on_cef_permission_request<
+    F: Fn(&str, u32) -> crate::CefPermissionDecision + Send + Sync + 'static,
+  >(
+    mut self,
+    handler: F,
+  ) -> Self {
+    with_cef_webview_attributes(self.runtime_specific_attributes_mut(), |attributes| {
+      attributes.cef_permission_handler = Some(Arc::new(handler));
+    });
+    self
+  }
+
+  fn on_cef_media_permission_request<
+    F: Fn(&str, u32) -> crate::CefPermissionDecision + Send + Sync + 'static,
+  >(
+    mut self,
+    handler: F,
+  ) -> Self {
+    with_cef_webview_attributes(self.runtime_specific_attributes_mut(), |attributes| {
+      attributes.cef_media_permission_handler = Some(Arc::new(handler));
+    });
+    self
+  }
+
   fn browser_runtime_style(mut self, style: RuntimeStyle) -> Self {
     with_cef_webview_attributes(self.runtime_specific_attributes_mut(), |attributes| {
       attributes.runtime_style = Some(style);
