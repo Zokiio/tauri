@@ -244,13 +244,27 @@ wrap_request_context_handler! {
   }
 }
 
-/// Applies a fixed-server proxy to a request context via the Chromium `proxy`
-/// preference. Must be called after the request context has initialized.
-///
-/// This is the per-webview `WebviewAttributes::proxy_url`; an application-wide proxy is
-/// the same preference written through `Cef::proxy`, and whichever is applied last wins
-/// on a given context.
-fn apply_proxy(request_context: &RequestContext, proxy_url: &url::Url) {
+wrap_completion_callback! {
+  struct ProxyConnectionsClosed {
+    ready: Arc<Mutex<Option<Box<dyn FnOnce()>>>>,
+  }
+
+  impl CompletionCallback {
+    fn on_complete(&self) {
+      let ready = self.ready.lock().unwrap().take();
+      if let Some(ready) = ready {
+        ready();
+      }
+    }
+  }
+}
+
+fn install_proxy(
+  proxy_url: &url::Url,
+  bypass_list: Option<&str>,
+  set: impl FnOnce(&serde_json::Value) -> bool,
+  close: impl FnOnce(),
+) -> bool {
   let scheme = match proxy_url.scheme() {
     "socks5" | "socks5h" => "socks5",
     "socks4" | "socks4a" => "socks4",
@@ -258,22 +272,54 @@ fn apply_proxy(request_context: &RequestContext, proxy_url: &url::Url) {
     _ => "http",
   };
   let Some(host) = proxy_url.host_str() else {
-    log::warn!("ignoring proxy URL without a host: {proxy_url}");
-    return;
+    return false;
   };
   let server = match proxy_url.port_or_known_default() {
     Some(port) => format!("{scheme}://{host}:{port}"),
     None => format!("{scheme}://{host}"),
   };
+  let mut preference = serde_json::json!({ "mode": "fixed_servers", "server": server });
+  if let Some(bypass_list) = bypass_list {
+    preference["bypass_list"] = bypass_list.into();
+  }
+  if !set(&preference) {
+    return false;
+  }
+  close();
+  true
+}
 
-  // A webview that asked for a proxy and did not get one would silently send its traffic
-  // straight out, so unlike most preferences this one is worth a warning.
-  if !preferences::set_preference(
-    request_context,
-    "proxy",
-    &serde_json::json!({ "mode": "fixed_servers", "server": server }),
+/// Installs the proxy and waits for Chromium to close existing connections
+/// before the webview can navigate.
+fn apply_proxy(
+  request_context: RequestContext,
+  proxy_url: &url::Url,
+  bypass_list: Option<&str>,
+  ready: RequestContextInitContinuation,
+) {
+  let ready = Arc::new(Mutex::new(Some(ready)));
+  if !install_proxy(
+    proxy_url,
+    bypass_list,
+    |value| preferences::set_preference(&request_context, "proxy", value),
+    || {
+      let context = request_context.clone();
+      let ready = ready.clone();
+      let mut callback =
+        ProxyConnectionsClosed::new(Arc::new(Mutex::new(Some(Box::new(move || {
+          let ready = ready.lock().unwrap().take();
+          if let Some(ready) = ready {
+            ready(Some(context));
+          }
+        })))));
+      request_context.close_all_connections(Some(&mut callback));
+    },
   ) {
     log::warn!("failed to apply the proxy preference to the CEF request context");
+    if let Some(ready) = ready.lock().unwrap().take() {
+      // Preserve the existing behavior for portable proxy_url callers.
+      ready(bypass_list.is_none().then_some(request_context));
+    }
   }
 }
 
@@ -388,6 +434,7 @@ pub(crate) fn request_context_from_webview_attributes<'a>(
   global_cache_path: &Path,
   webview_attributes: &WebviewAttributes,
   shared_request_context: Option<RequestContext>,
+  proxy_bypass_list: Option<String>,
   profile_preferences: Arc<Vec<(String, serde_json::Value)>>,
   content_settings: Arc<Vec<(ContentSettingTypes, ContentSettingValues)>>,
   custom_schemes: impl IntoIterator<Item = &'a String>,
@@ -407,18 +454,19 @@ pub(crate) fn request_context_from_webview_attributes<'a>(
   let wrapped_callback: RequestContextInitContinuation = Box::new({
     let rc_holder = rc_holder.clone();
     move |rc| {
-      // Preferences and content settings can only be set once the request context's
-      // underlying profile has finished initializing, which is exactly what this
-      // continuation signals.
+      let ready: RequestContextInitContinuation = Box::new(move |rc| {
+        on_initialized(rc);
+        let _released = rc_holder.lock().unwrap().take();
+      });
       if let Some(rc) = rc.as_ref() {
         preferences::apply_app_webview_preferences(rc, &profile_preferences);
         preferences::apply_default_content_settings(rc, &content_settings);
         if let Some(proxy_url) = proxy_url.as_ref() {
-          apply_proxy(rc, proxy_url);
+          apply_proxy(rc.clone(), proxy_url, proxy_bypass_list.as_deref(), ready);
+          return;
         }
       }
-      on_initialized(rc);
-      let _released = rc_holder.lock().unwrap().take();
+      ready(rc);
     }
   });
 
@@ -454,6 +502,42 @@ pub(crate) fn request_context_from_webview_attributes<'a>(
 #[cfg(test)]
 mod data_store_tests {
   use super::*;
+
+  #[test]
+  fn proxy_sets_bypass_rules_before_closing_connections() {
+    use std::cell::Cell;
+
+    let state = Cell::new(0);
+    let url = "http://127.0.0.1:8080".parse().unwrap();
+    assert!(install_proxy(
+      &url,
+      Some("*,<-loopback>"),
+      |value| {
+        assert_eq!(
+          value,
+          &serde_json::json!({
+            "mode": "fixed_servers",
+            "server": "http://127.0.0.1:8080",
+            "bypass_list": "*,<-loopback>",
+          })
+        );
+        assert_eq!(state.replace(1), 0);
+        true
+      },
+      || assert_eq!(state.replace(2), 1),
+    ));
+    assert_eq!(state.get(), 2);
+
+    assert!(!install_proxy(
+      &url,
+      None,
+      |value| {
+        assert!(value.get("bypass_list").is_none());
+        false
+      },
+      || panic!("connections were closed after a rejected preference")
+    ));
+  }
 
   #[test]
   fn incognito_webviews_can_share_only_an_off_the_record_profile() {
