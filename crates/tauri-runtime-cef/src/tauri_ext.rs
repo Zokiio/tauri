@@ -437,6 +437,10 @@ pub trait WebviewBuilderCefExt {
   #[must_use]
   fn with_shared_request_context(self, context: cef::RequestContext) -> Self;
 
+  /// Sets Chromium proxy bypass rules on the profile using this webview's proxy URL.
+  #[must_use]
+  fn proxy_bypass_list(self, bypass_list: impl Into<String>) -> Self;
+
   /// Observes find-in-page updates from this webview on the CEF UI thread.
   #[must_use]
   fn on_find_result<F: Fn(crate::FindResult) + Send + Sync + 'static>(self, handler: F) -> Self;
@@ -530,6 +534,13 @@ where
   fn with_shared_request_context(mut self, context: cef::RequestContext) -> Self {
     with_cef_webview_attributes(self.runtime_specific_attributes_mut(), |attributes| {
       attributes.shared_request_context = Some(context);
+    });
+    self
+  }
+
+  fn proxy_bypass_list(mut self, bypass_list: impl Into<String>) -> Self {
+    with_cef_webview_attributes(self.runtime_specific_attributes_mut(), |attributes| {
+      attributes.proxy_bypass_list = Some(bypass_list.into());
     });
     self
   }

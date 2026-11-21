@@ -1044,6 +1044,7 @@ impl<T: UserEvent> WinitCefApp<T> {
         .runtime_specific_attributes
         .shared_request_context
         .take(),
+      pending.runtime_specific_attributes.proxy_bypass_list.take(),
       context.profile_preferences.clone(),
       context.content_settings.clone(),
       uri_scheme_protocols.keys(),
@@ -1593,6 +1594,8 @@ pub struct CefWebviewAttributes {
   /// Use a profile dedicated to untrusted content with `without_ipc` and keep it
   /// separate from profiles that register app protocols.
   pub shared_request_context: Option<cef::RequestContext>,
+  /// Chromium's bypass rules for this profile's fixed-server proxy.
+  pub proxy_bypass_list: Option<String>,
   /// Families of Chrome commands this webview keeps rather than swallows.
   ///
   /// Empty by default, which blocks every group in [`ChromeCommandGroup`].
@@ -1648,6 +1651,7 @@ impl std::fmt::Debug for CefWebviewAttributes {
         "shared_request_context",
         &self.shared_request_context.is_some(),
       )
+      .field("proxy_bypass_list", &self.proxy_bypass_list)
       .field("allowed_chrome_commands", &self.allowed_chrome_commands)
       .field(
         "browser_settings_callback",
