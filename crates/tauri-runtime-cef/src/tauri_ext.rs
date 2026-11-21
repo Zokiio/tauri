@@ -452,6 +452,15 @@ pub trait WebviewBuilderCefExt {
     handler: F,
   ) -> Self;
 
+  /// Applies a request policy on the CEF IO thread, including worker requests.
+  #[must_use]
+  fn on_before_resource_load<
+    F: Fn(&url::Url) -> crate::BeforeResourceLoad + Send + Sync + 'static,
+  >(
+    self,
+    handler: F,
+  ) -> Self;
+
   /// Observes find-in-page updates from this webview on the CEF UI thread.
   #[must_use]
   fn on_find_result<F: Fn(crate::FindResult) + Send + Sync + 'static>(self, handler: F) -> Self;
@@ -564,6 +573,18 @@ where
   ) -> Self {
     with_cef_webview_attributes(self.runtime_specific_attributes_mut(), |attributes| {
       attributes.auth_credentials_handler = Some(Arc::new(handler));
+    });
+    self
+  }
+
+  fn on_before_resource_load<
+    F: Fn(&url::Url) -> crate::BeforeResourceLoad + Send + Sync + 'static,
+  >(
+    mut self,
+    handler: F,
+  ) -> Self {
+    with_cef_webview_attributes(self.runtime_specific_attributes_mut(), |attributes| {
+      attributes.before_resource_load_handler = Some(Arc::new(handler));
     });
     self
   }

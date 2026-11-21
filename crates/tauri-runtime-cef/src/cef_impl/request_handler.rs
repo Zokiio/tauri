@@ -212,6 +212,7 @@ wrap_with_args! {
   pub struct WebRequestHandler<T: UserEvent> {
     navigation_handler: Option<Arc<NavigationHandler>>,
     auth_credentials_handler: Option<Arc<crate::AuthCredentialsHandler>>,
+    before_resource_load_handler: Option<Arc<crate::BeforeResourceLoadHandler>>,
     frame_event_handler: Option<Arc<crate::FrameEventHandler>>,
     context: RuntimeContext<T>,
     window_id: WindowId,
@@ -374,24 +375,61 @@ wrap_with_args! {
       _request_initiator: Option<&CefString>,
       _disable_default_handling: Option<&mut ::std::os::raw::c_int>,
     ) -> Option<ResourceRequestHandler> {
-      // The handler only intercepts the drag-drop bridge requests; when the
-      // bridge is disabled it would pass every request straight through, so skip
-      // building (and cloning the context + state into) a handler that CEF calls
-      // for every subresource/fetch/XHR the page makes.
-      if !self.drag_drop_handler_enabled {
-        return None;
-      }
-
-      Some(WebDragDropResourceRequestHandler::build(
-        WebDragDropResourceRequestHandlerArgs {
+      let drag_handler = self.drag_drop_handler_enabled.then(|| {
+        WebDragDropResourceRequestHandler::build(WebDragDropResourceRequestHandlerArgs {
           context: self.context.clone(),
           window_id: self.window_id,
           webview_id: self.webview_id,
           drag_drop_event_target: self.drag_drop_event_target,
           drag_drop_handler_enabled: self.drag_drop_handler_enabled,
           drag_drop_state: self.drag_drop_state.clone(),
-        },
-      ))
+        })
+      });
+      guarded_resource_handler(self.before_resource_load_handler.clone(), drag_handler)
+    }
+  }
+}
+
+pub(crate) fn guarded_resource_handler(
+  policy: Option<Arc<crate::BeforeResourceLoadHandler>>,
+  next: Option<ResourceRequestHandler>,
+) -> Option<ResourceRequestHandler> {
+  match policy {
+    Some(policy) => Some(GuardedResourceHandler::new(policy, next)),
+    None => next,
+  }
+}
+
+wrap_resource_request_handler! {
+  struct GuardedResourceHandler {
+    policy: Arc<crate::BeforeResourceLoadHandler>,
+    next: Option<ResourceRequestHandler>,
+  }
+
+  impl ResourceRequestHandler {
+    fn on_before_resource_load(
+      &self,
+      browser: Option<&mut Browser>,
+      frame: Option<&mut Frame>,
+      request: Option<&mut Request>,
+      callback: Option<&mut Callback>,
+    ) -> ReturnValue {
+      if let Some(request) = request.as_ref()
+        && let Ok(url) = Url::parse(&CefString::from(&request.url()).to_string())
+      {
+        match (self.policy)(&url) {
+          crate::BeforeResourceLoad::Continue => {}
+          crate::BeforeResourceLoad::Redirect(url) => {
+            request.set_url(Some(&CefString::from(url.as_str())));
+            return sys::cef_return_value_t::RV_CONTINUE.into();
+          }
+          crate::BeforeResourceLoad::Cancel => return sys::cef_return_value_t::RV_CANCEL.into(),
+        }
+      }
+      match &self.next {
+        Some(next) => next.on_before_resource_load(browser, frame, request, callback),
+        None => sys::cef_return_value_t::RV_CONTINUE.into(),
+      }
     }
   }
 }
@@ -908,5 +946,51 @@ mod proxy_auth_tests {
       *credentials.borrow(),
       Some(("test-user".into(), "test-password".into())),
     );
+  }
+}
+
+#[cfg(test)]
+mod before_resource_load_tests {
+  use super::*;
+  use crate::BeforeResourceLoad;
+
+  #[test]
+  fn guarded_requests_continue_redirect_or_cancel() {
+    crate::initialize_cef_test_api();
+    let url = "http://localhost/file";
+    let redirect = "http://localhost/redirect";
+    for (decision, status, target) in [
+      (
+        BeforeResourceLoad::Continue,
+        sys::cef_return_value_t::RV_CONTINUE,
+        url,
+      ),
+      (
+        BeforeResourceLoad::Redirect(redirect.parse().unwrap()),
+        sys::cef_return_value_t::RV_CONTINUE,
+        redirect,
+      ),
+      (
+        BeforeResourceLoad::Cancel,
+        sys::cef_return_value_t::RV_CANCEL,
+        url,
+      ),
+    ] {
+      let guard = guarded_resource_handler(
+        Some(Arc::new(move |input| {
+          assert_eq!(input.as_str(), url);
+          decision.clone()
+        })),
+        None,
+      )
+      .unwrap();
+      let mut request = cef::request_create().unwrap();
+      request.set_url(Some(&CefString::from(url)));
+      assert_eq!(
+        guard.on_before_resource_load(None, None, Some(&mut request), None),
+        status.into()
+      );
+      assert_eq!(CefString::from(&request.url()).to_string(), target);
+    }
   }
 }

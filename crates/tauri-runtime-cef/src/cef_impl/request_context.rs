@@ -231,6 +231,7 @@ thread_local! {
 wrap_request_context_handler! {
   struct WebviewRequestContextHandler {
     on_initialized: Arc<Mutex<Option<RequestContextInitContinuation>>>,
+    before_resource_load_handler: Option<Arc<crate::BeforeResourceLoadHandler>>,
   }
 
   impl RequestContextHandler {
@@ -240,6 +241,18 @@ wrap_request_context_handler! {
       };
       let request_context = request_context.map(|rc| rc.clone());
       callback(request_context);
+    }
+    fn resource_request_handler(
+      &self,
+      _browser: Option<&mut Browser>,
+      _frame: Option<&mut Frame>,
+      _request: Option<&mut Request>,
+      _is_navigation: i32,
+      _is_download: i32,
+      _request_initiator: Option<&CefString>,
+      _disable_default_handling: Option<&mut i32>,
+    ) -> Option<ResourceRequestHandler> {
+      request_handler::guarded_resource_handler(self.before_resource_load_handler.clone(), None)
     }
   }
 }
@@ -435,6 +448,7 @@ pub(crate) fn request_context_from_webview_attributes<'a>(
   webview_attributes: &WebviewAttributes,
   shared_request_context: Option<RequestContext>,
   proxy_bypass_list: Option<String>,
+  before_resource_load_handler: Option<Arc<crate::BeforeResourceLoadHandler>>,
   profile_preferences: Arc<Vec<(String, serde_json::Value)>>,
   content_settings: Arc<Vec<(ContentSettingTypes, ContentSettingValues)>>,
   custom_schemes: impl IntoIterator<Item = &'a String>,
@@ -470,7 +484,10 @@ pub(crate) fn request_context_from_webview_attributes<'a>(
     }
   });
 
-  let mut handler = WebviewRequestContextHandler::new(Arc::new(Mutex::new(Some(wrapped_callback))));
+  let mut handler = WebviewRequestContextHandler::new(
+    Arc::new(Mutex::new(Some(wrapped_callback))),
+    before_resource_load_handler,
+  );
   let request_context = create_webview_request_context(
     global_cache_path,
     webview_attributes,
@@ -537,6 +554,24 @@ mod data_store_tests {
       },
       || panic!("connections were closed after a rejected preference")
     ));
+  }
+
+  #[test]
+  fn request_context_installs_worker_guard_without_a_browser() {
+    crate::initialize_cef_test_api();
+    let handler = WebviewRequestContextHandler::new(
+      Arc::new(Mutex::new(None)),
+      Some(Arc::new(|_| crate::BeforeResourceLoad::Cancel)),
+    );
+    let guard = handler
+      .resource_request_handler(None, None, None, 0, 0, None, None)
+      .expect("worker handler");
+    let mut request = cef::request_create().unwrap();
+    request.set_url(Some(&CefString::from("http://localhost/")));
+    assert_eq!(
+      guard.on_before_resource_load(None, None, Some(&mut request), None),
+      cef::sys::cef_return_value_t::RV_CANCEL.into(),
+    );
   }
 
   #[test]

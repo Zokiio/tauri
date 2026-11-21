@@ -829,6 +829,10 @@ impl<T: UserEvent> WinitCefApp<T> {
         .console_message_handler
         .clone(),
       permission_request_handler: pending.permission_request_handler.take().map(Arc::from),
+      before_resource_load_handler: pending
+        .runtime_specific_attributes
+        .before_resource_load_handler
+        .clone(),
       auth_credentials_handler: pending
         .runtime_specific_attributes
         .auth_credentials_handler
@@ -1049,6 +1053,10 @@ impl<T: UserEvent> WinitCefApp<T> {
         .shared_request_context
         .take(),
       pending.runtime_specific_attributes.proxy_bypass_list.take(),
+      pending
+        .runtime_specific_attributes
+        .before_resource_load_handler
+        .take(),
       context.profile_preferences.clone(),
       context.content_settings.clone(),
       uri_scheme_protocols.keys(),
@@ -1598,6 +1606,8 @@ pub struct CefWebviewAttributes {
   /// Use a profile dedicated to untrusted content with `without_ipc` and keep it
   /// separate from profiles that register app protocols.
   pub shared_request_context: Option<cef::RequestContext>,
+  /// Policy for this webview's and its profile workers' outgoing requests.
+  pub before_resource_load_handler: Option<Arc<BeforeResourceLoadHandler>>,
   /// Supplies credentials for proxy authentication challenges on the CEF IO thread.
   pub auth_credentials_handler: Option<Arc<AuthCredentialsHandler>>,
   /// Chromium's bypass rules for this profile's fixed-server proxy.
@@ -1613,6 +1623,20 @@ pub struct CefWebviewAttributes {
   /// equivalent — the font families and sizes, `remote_fonts`, `local_storage`,
   /// `databases`, `webgl`, `tab_to_links`, `javascript_dom_paste`, `default_encoding`.
   pub browser_settings_callback: Option<Arc<BrowserSettingsCallback>>,
+}
+
+/// Applies a policy to an outgoing request on the CEF IO thread.
+pub type BeforeResourceLoadHandler = dyn Fn(&Url) -> BeforeResourceLoad + Send + Sync;
+
+/// How CEF should handle an outgoing request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BeforeResourceLoad {
+  /// Keep the URL and send the request.
+  Continue,
+  /// Substitute a different URL before sending the request.
+  Redirect(Url),
+  /// Reject the request.
+  Cancel,
 }
 
 /// Supplies a username and password for a proxy challenge.
@@ -1663,6 +1687,10 @@ impl std::fmt::Debug for CefWebviewAttributes {
         &self.shared_request_context.is_some(),
       )
       .field("proxy_bypass_list", &self.proxy_bypass_list)
+      .field(
+        "before_resource_load_handler",
+        &self.before_resource_load_handler.is_some(),
+      )
       .field(
         "auth_credentials_handler",
         &self.auth_credentials_handler.is_some(),
