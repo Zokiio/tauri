@@ -88,6 +88,7 @@ wrap_with_args! {
     new_window_handler: Option<Arc<tauri_runtime::webview::NewWindowHandler<T, CefRuntime<T>>>>,
     initial_url: Option<String>,
     without_ipc: bool,
+    ipc_access_policy: Option<Arc<tauri_runtime::webview::IpcAccessPolicy>>,
     frame_navigation_state: crate::FrameNavigationState,
     popup_family: Weak<crate::popup::PopupFamily>,
     opener: Option<crate::popup::PopupRequest>,
@@ -135,11 +136,14 @@ wrap_with_args! {
       // script a blank one. See `Cef::frame_hosts_without_ipc`.
       let hosts = &self.context.frame_hosts_without_ipc;
       if !hosts.is_empty()
-        && frame.is_some_and(|frame| crate::cef_impl::ipc::frame_without_ipc(&*frame, hosts))
+        && frame
+          .as_deref()
+          .is_some_and(|frame| crate::cef_impl::ipc::frame_without_ipc(frame, hosts))
       {
         log::debug!("refused a popup from a frame without `window.ipc`");
         return 1;
       }
+      let opener_is_subframe = frame.as_deref().is_none_or(|frame| frame.is_main() == 0);
       if let Some(window_info) = window_info {
         window_info.windowless_rendering_enabled = 0;
         window_info.shared_texture_enabled = 0;
@@ -164,7 +168,13 @@ wrap_with_args! {
       } else { tauri_runtime::webview::NewWindowResponse::Allow };
       match response {
         tauri_runtime::webview::NewWindowResponse::Allow => {
-          if self.without_ipc && !extra_info.is_some_and(crate::cef_impl::ipc::mark_without_ipc) {
+          if self.without_ipc || opener_is_subframe {
+            if !extra_info.is_some_and(crate::cef_impl::ipc::mark_without_ipc) {
+              return 1;
+            }
+          } else if let Some(policy) = self.ipc_access_policy.as_deref()
+            && !extra_info.is_some_and(|slot| crate::cef_impl::ipc::write_ipc_policy(slot, policy))
+          {
             return 1;
           }
           let (Some(browser), Some(client), Some(family)) =

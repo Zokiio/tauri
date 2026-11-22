@@ -49,6 +49,7 @@ pub(crate) type SchemeRegistry = Arc<
         String,
         Arc<Box<UriSchemeProtocolHandler>>,
         Arc<Vec<CefInitScript>>,
+        Option<Arc<tauri_runtime::webview::IpcAccessPolicy>>,
       ),
     >,
   >,
@@ -679,7 +680,7 @@ wrap_scheme_handler_factory! {
         return Some(refused_from_frame_without_ipc(self.main_thread.clone()));
       }
 
-      let (webview_label, handler, initialization_scripts) = match browser {
+      let (webview_label, handler, initialization_scripts, ipc_access_policy) = match browser {
         Some(browser) => {
           let id = browser.identifier();
 
@@ -693,41 +694,62 @@ wrap_scheme_handler_factory! {
         }
         // `browser`/`frame` are null for requests that do not originate from a
         // browser: service worker (main script and update) fetches and
-        // CefURLRequest. Returning `None` here would fall through to the
-        // network service, where `{scheme}.localhost` resolves to loopback and
-        // the connection is refused — which is exactly how service worker
-        // registration on a custom-protocol origin used to fail with "An
-        // unknown error occurred when fetching the script.".
-        //
-        // Every registry entry for a given scheme wraps the same app-level
-        // `UriSchemeProtocolHandler`, so any live entry can serve the request;
-        // only the webview label differs, and asset serving does not depend on
-        // it. Initialization scripts are per-document injections, meaningless
-        // without a browser, so they are not applied on this path.
+        // CefURLRequest. Never allow `ipc` or non-`tauri` app schemes to borrow
+        // an arbitrary live webview's registration and label without a browser/frame.
         None => {
-          let (webview_label, handler, _) = self
+          if self.scheme == "ipc" {
+            log::debug!("refused a browserless `ipc` custom-scheme request");
+            return Some(refused_from_frame_without_ipc(self.main_thread.clone()));
+          }
+          if self.scheme != "tauri" {
+            return None;
+          }
+          let (webview_label, handler, _, _) = self
             .registry
             .lock()
             .unwrap()
             .iter()
             .find(|((_, scheme), _)| *scheme == self.scheme)
             .map(|(_, entry)| entry.clone())?;
-          (webview_label, handler, Arc::new(Vec::new()))
+          (webview_label, handler, Arc::new(Vec::new()), None)
         }
       };
+
+      // Enforce the webview's capability-derived IPC access policy on `ipc://` requests
+      // using the browser-owned initiating frame, never trusting request headers alone.
+      if self.scheme == "ipc"
+        && let Some(policy) = ipc_access_policy.as_deref()
+      {
+        let allowed = frame.as_deref().is_some_and(|frame| {
+          let frame_url = CefString::from(&frame.url()).to_string();
+          Url::parse(&frame_url)
+            .ok()
+            .is_some_and(|parsed| policy.allows_url(&parsed, frame.is_main() != 0))
+        });
+        if !allowed {
+          log::debug!("refused an `ipc` custom-scheme request rejected by IPC access policy");
+          return Some(refused_from_frame_without_ipc(self.main_thread.clone()));
+        }
+      }
 
       // A subframe navigation is the only case we can positively identify here, so anything
       // else (a null frame included) keeps the main frame behavior of injecting everything.
       let is_main_frame = frame.as_ref().map(|frame| frame.is_main() == 1).unwrap_or(true);
 
       // Capture the initiating main frame's origin so `process_request` can
-      // repair a racy `Origin: null` header. Restricted to the main frame: it
-      // is never an opaque-origin (sandboxed) document in a Tauri webview, so
-      // upgrading its origin is safe; subframes are intentionally left alone.
+      // repair a racy `Origin: null` header. Restricted to the main frame, and
+      // for `ipc` only when the main frame's URL is admitted by the IPC access
+      // policy (so a sandboxed/untrusted main frame never has `Origin: null` upgraded).
       let initiator_origin = frame
         .filter(|frame| frame.is_main() == 1)
         .map(|frame| CefString::from(&frame.url()).to_string())
         .and_then(|url| Url::parse(&url).ok())
+        .filter(|url| {
+          self.scheme != "ipc"
+            || ipc_access_policy
+              .as_deref()
+              .is_none_or(|policy| policy.allows_url(url, true))
+        })
         .map(|url| url.origin().ascii_serialization())
         .filter(|origin| origin != "null");
 

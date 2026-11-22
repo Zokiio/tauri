@@ -126,8 +126,20 @@ impl<R: Runtime> WebviewManager<R> {
     manager: &M,
   ) -> crate::Result<PendingWebview<EventLoopMessage, R>> {
     let app_manager = manager.manager();
+    let ipc_contexts = app_manager
+      .runtime_authority
+      .lock()
+      .unwrap()
+      .webview_ipc_contexts(window_label, label);
+    let capability_disables_ipc =
+      ipc_contexts.has_capabilities_configured && !ipc_contexts.matches_any;
+    if capability_disables_ipc {
+      pending.webview_attributes.without_ipc = true;
+    }
 
     if pending.webview_attributes.without_ipc {
+      pending.webview_attributes.ipc_access_policy =
+        Some(tauri_runtime::webview::IpcAccessPolicy::Disabled);
       pending
         .blocked_app_protocols
         .extend(self.uri_scheme_protocols.lock().unwrap().keys().cloned());
@@ -145,6 +157,33 @@ impl<R: Runtime> WebviewManager<R> {
       pending.ipc_handler = None;
       pending.webview_attributes.drag_drop_handler_enabled = false;
       return Ok(pending);
+    }
+
+    {
+      let use_https_scheme = pending.webview_attributes.use_https_scheme;
+      let mut allowed_origins = Vec::new();
+      if ipc_contexts.allows_local || !ipc_contexts.has_capabilities_configured {
+        for candidate in [
+          Url::parse(&app_manager.custom_scheme_url("tauri", use_https_scheme)).ok(),
+          Some(app_manager.get_app_url(use_https_scheme).into_owned()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+          if let Some(origin) = tauri_runtime::webview::IpcAccessPolicy::normalized_origin(&candidate)
+            && !allowed_origins
+              .iter()
+              .any(|existing: &String| existing.eq_ignore_ascii_case(&origin))
+          {
+            allowed_origins.push(origin);
+          }
+        }
+      }
+      pending.webview_attributes.ipc_access_policy =
+        Some(tauri_runtime::webview::IpcAccessPolicy::MainFrameOnly {
+          allowed_origins,
+          remote_urls: ipc_contexts.remote_urls,
+        });
     }
 
     let plugin_init_scripts = app_manager.plugins.initialization_script();
@@ -855,6 +894,94 @@ mod tests {
           .blocked_app_protocols
           .iter()
           .any(|protocol| protocol == name)
+      );
+    }
+  }
+
+  #[test]
+  fn capability_policy_disables_unmatched_webviews_and_scopes_matched_ones() {
+    use tauri_utils::acl::ExecutionContext;
+    use tauri_utils::acl::resolved::{Resolved, ResolvedCommand};
+
+    let mut resolved = Resolved::default();
+    resolved.allowed_commands.insert(
+      "plugin:event|emit".to_string(),
+      vec![ResolvedCommand {
+        context: ExecutionContext::Local,
+        windows: Vec::new(),
+        webviews: vec!["main".parse().unwrap()],
+        ..Default::default()
+      }],
+    );
+
+    let mut context = crate::test::mock_context(crate::test::noop_assets());
+    context.runtime_authority = crate::ipc::RuntimeAuthority::new(
+      #[cfg(any(feature = "dynamic-acl", debug_assertions))]
+      Default::default(),
+      resolved,
+    );
+
+    let app = crate::test::mock_builder()
+      .register_uri_scheme_protocol("gups-mcp-app", |_, _| http::Response::new(Vec::new()))
+      .build(context)
+      .unwrap();
+    let manager = &app.manager().webview;
+
+    let prepare = |label: &str| {
+      let attributes = tauri_runtime::webview::WebviewAttributes::new(WebviewUrl::default());
+      manager
+        .prepare_webview(
+          &app,
+          PendingWebview::new(attributes, (), label).unwrap(),
+          "main",
+        )
+        .unwrap()
+    };
+
+    // Matched webview (`main`) gets MainFrameOnly policy with local app origin only,
+    // NOT the user-registered `gups-mcp-app` custom scheme.
+    let main_wv = prepare("main");
+    assert!(!main_wv.webview_attributes.without_ipc);
+    assert!(main_wv.ipc_handler.is_some());
+    let policy = main_wv
+      .webview_attributes
+      .ipc_access_policy
+      .as_ref()
+      .expect("main webview should receive capability-derived IPC policy");
+    let local_app_url = Url::parse(&app.manager().custom_scheme_url("tauri", false)).unwrap();
+    assert!(policy.allows_url(&local_app_url, true));
+    assert!(!policy.allows_url(&local_app_url, false));
+    assert!(!policy.allows_url(
+      &Url::parse("http://gups-mcp-app.localhost/token/index.html").unwrap(),
+      true
+    ));
+    assert!(!policy.allows_url(
+      &Url::parse("gups-mcp-app://localhost/token/index.html").unwrap(),
+      true
+    ));
+    assert!(!policy.allows_url(
+      &Url::parse("http://gups-mcp-app.localhost/token/index.html").unwrap(),
+      false
+    ));
+
+    // Unmatched child webview (`preview-0`) in the same `"main"` window automatically
+    // gets IPC and app protocols disabled when capabilities target `webviews: ["main"]`.
+    let preview_wv = prepare("preview-0");
+    assert!(preview_wv.webview_attributes.without_ipc);
+    assert_eq!(
+      preview_wv.webview_attributes.ipc_access_policy,
+      Some(tauri_runtime::webview::IpcAccessPolicy::Disabled)
+    );
+    assert!(preview_wv.ipc_handler.is_none());
+    assert!(preview_wv.webview_attributes.initialization_scripts.is_empty());
+    assert!(preview_wv.uri_scheme_protocols.is_empty());
+    for name in ["ipc", "tauri", "gups-mcp-app"] {
+      assert!(
+        preview_wv
+          .blocked_app_protocols
+          .iter()
+          .any(|protocol| protocol == name),
+        "missing blocked protocol {name}"
       );
     }
   }

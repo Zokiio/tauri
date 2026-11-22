@@ -700,6 +700,54 @@ impl RuntimeAuthority {
   }
 }
 
+/// Summary of capability-granted IPC execution contexts for one `(window, webview)` pair.
+#[derive(Debug, Default)]
+pub(crate) struct WebviewIpcContexts {
+  /// Whether the app configured any capability permissions at all.
+  pub(crate) has_capabilities_configured: bool,
+  /// Whether at least one capability matches `(window, webview)`.
+  pub(crate) matches_any: bool,
+  /// Whether at least one matching capability grants `ExecutionContext::Local`.
+  pub(crate) allows_local: bool,
+  /// Remote URL patterns granted by matching capabilities.
+  pub(crate) remote_urls: Vec<tauri_utils::acl::RemoteUrlPattern>,
+}
+
+impl RuntimeAuthority {
+  /// Summarizes which IPC execution contexts capabilities grant to `(window, webview)`.
+  pub(crate) fn webview_ipc_contexts(&self, window: &str, webview: &str) -> WebviewIpcContexts {
+    let inner = self.inner();
+    let has_capabilities_configured = !inner.allowed_commands.is_empty();
+    let mut matches_any = false;
+    let mut allows_local = false;
+    let mut remote_urls = Vec::new();
+
+    for cmd in inner.allowed_commands.values().flatten() {
+      let label_matches = cmd.webviews.iter().any(|w| w.matches(webview))
+        || cmd.windows.iter().any(|w| w.matches(window));
+      if !label_matches {
+        continue;
+      }
+      matches_any = true;
+      match &cmd.context {
+        ExecutionContext::Local => allows_local = true,
+        ExecutionContext::Remote { url } => {
+          if !remote_urls.iter().any(|existing| existing == url) {
+            remote_urls.push(url.clone());
+          }
+        }
+      }
+    }
+
+    WebviewIpcContexts {
+      has_capabilities_configured,
+      matches_any,
+      allows_local,
+      remote_urls,
+    }
+  }
+}
+
 impl RuntimeAuthorityInner {
   /// Returns the deny entries of the given command whose execution context matches the given origin.
   ///

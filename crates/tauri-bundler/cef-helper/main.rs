@@ -165,40 +165,179 @@ fn install_ipc_post_message(context: Option<&mut V8Context>) {
   window.set_value_bykey(Some(&CefString::from("ipc")), Some(&mut ipc), attributes);
 }
 
-// The standalone macOS helper mirrors this key and browser tracking.
+// The standalone macOS helper mirrors these keys, origin helper, and browser tracking.
 const WITHOUT_IPC_KEY: &str = "tauri_without_ipc";
+const IPC_MAIN_FRAME_ONLY_KEY: &str = "tauri_ipc_main_frame_only";
+const IPC_ALLOWED_ORIGINS_KEY: &str = "tauri_ipc_allowed_origins";
+const IPC_HAS_REMOTE_URLS_KEY: &str = "tauri_ipc_has_remote_urls";
+
+fn url_origin(url: &str) -> Option<String> {
+  let (scheme, rest) = url.split_once("://")?;
+  if scheme.is_empty()
+    || !scheme
+      .bytes()
+      .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
+  {
+    return None;
+  }
+  let scheme_lower = scheme.to_ascii_lowercase();
+  if matches!(scheme_lower.as_str(), "blob" | "data" | "about" | "javascript" | "file") {
+    return None;
+  }
+  let authority = rest.split(['/', '?', '#']).next()?;
+  if authority.is_empty() || authority.contains('@') {
+    return None;
+  }
+  let (host, port) = if let Some(bracketed) = authority.strip_prefix('[') {
+    let (h, after) = bracketed.split_once(']')?;
+    if h.is_empty() {
+      return None;
+    }
+    let port = match after {
+      "" => None,
+      p => Some(p.strip_prefix(':')?),
+    };
+    (format!("[{}]", h.to_ascii_lowercase()), port)
+  } else if let Some((h, p)) = authority.rsplit_once(':') {
+    if h.is_empty() {
+      return None;
+    }
+    (h.to_ascii_lowercase(), Some(p))
+  } else {
+    (authority.to_ascii_lowercase(), None)
+  };
+  let port = match port {
+    None | Some("") => None,
+    Some(p) => {
+      if !p.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+      }
+      let is_default = (scheme_lower == "http" && p == "80")
+        || (scheme_lower == "https" && p == "443");
+      (!is_default).then_some(p)
+    }
+  };
+  Some(match port {
+    Some(p) => format!("{scheme_lower}://{host}:{p}"),
+    None => format!("{scheme_lower}://{host}"),
+  })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RendererIpcPolicy {
+  AllFrames,
+  Disabled,
+  MainFrameOnly {
+    allowed_origins: Vec<String>,
+    has_remote_urls: bool,
+  },
+}
+
+impl RendererIpcPolicy {
+  fn from_extra_info(extra_info: Option<&DictionaryValue>) -> Self {
+    let Some(info) = extra_info else {
+      return Self::AllFrames;
+    };
+    if info.bool(Some(&CefString::from(WITHOUT_IPC_KEY))) != 0 {
+      return Self::Disabled;
+    }
+    if info.bool(Some(&CefString::from(IPC_MAIN_FRAME_ONLY_KEY))) != 0 {
+      let raw = CefString::from(&info.string(Some(&CefString::from(IPC_ALLOWED_ORIGINS_KEY))))
+        .to_string();
+      let allowed_origins = raw
+        .split(',')
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+      let has_remote_urls = info.bool(Some(&CefString::from(IPC_HAS_REMOTE_URLS_KEY))) != 0;
+      return Self::MainFrameOnly {
+        allowed_origins,
+        has_remote_urls,
+      };
+    }
+    Self::AllFrames
+  }
+
+  fn allows_context(&self, is_main_frame: bool, window_origin: Option<&str>, frame_url: &str) -> bool {
+    match self {
+      Self::AllFrames => true,
+      Self::Disabled => false,
+      Self::MainFrameOnly {
+        allowed_origins,
+        has_remote_urls,
+      } => {
+        if !is_main_frame {
+          return false;
+        }
+        let effective_origin = match window_origin {
+          Some("null") => return false,
+          Some(origin) if !origin.is_empty() => origin.to_ascii_lowercase(),
+          _ => match url_origin(frame_url) {
+            Some(origin) => origin,
+            None => return false,
+          },
+        };
+        if allowed_origins
+          .iter()
+          .any(|allowed| allowed.eq_ignore_ascii_case(&effective_origin))
+        {
+          return true;
+        }
+        *has_remote_urls
+      }
+    }
+  }
+}
 
 #[derive(Default)]
-struct IpcDisabledBrowsers(HashMap<i32, usize>);
+struct BrowserIpcPolicies(HashMap<i32, (usize, RendererIpcPolicy)>);
 
-impl IpcDisabledBrowsers {
+impl BrowserIpcPolicies {
   fn created(&mut self, id: i32, extra_info: Option<&DictionaryValue>) {
-    let key = CefString::from(WITHOUT_IPC_KEY);
-    let marked = extra_info.is_some_and(|info| info.bool(Some(&key)) != 0);
-    // During a cross-origin transition, a replacement with the same ID can
-    // arrive before CEF destroys the old renderer-side browser.
-    if self.0.contains_key(&id) || marked {
-      *self.0.entry(id).or_default() += 1;
+    let incoming = RendererIpcPolicy::from_extra_info(extra_info);
+    let entry = self.0.entry(id).or_insert((0, incoming.clone()));
+    entry.0 += 1;
+    if matches!(incoming, RendererIpcPolicy::Disabled)
+      || (matches!(entry.1, RendererIpcPolicy::AllFrames)
+        && !matches!(incoming, RendererIpcPolicy::AllFrames))
+    {
+      entry.1 = incoming;
     }
   }
 
   fn destroyed(&mut self, id: i32) {
     if let std::collections::hash_map::Entry::Occupied(mut entry) = self.0.entry(id) {
-      *entry.get_mut() -= 1;
-      if *entry.get() == 0 {
+      entry.get_mut().0 -= 1;
+      if entry.get().0 == 0 {
         entry.remove();
       }
     }
   }
 
-  fn contains(&self, id: i32) -> bool {
-    self.0.contains_key(&id)
+  fn policy(&self, id: i32) -> RendererIpcPolicy {
+    self
+      .0
+      .get(&id)
+      .map(|(_, policy)| policy.clone())
+      .unwrap_or(RendererIpcPolicy::AllFrames)
   }
 }
 
-fn ipc_disabled_browsers() -> &'static Mutex<IpcDisabledBrowsers> {
-  static BROWSERS: OnceLock<Mutex<IpcDisabledBrowsers>> = OnceLock::new();
+fn browser_ipc_policies() -> &'static Mutex<BrowserIpcPolicies> {
+  static BROWSERS: OnceLock<Mutex<BrowserIpcPolicies>> = OnceLock::new();
   BROWSERS.get_or_init(Mutex::default)
+}
+
+fn context_window_origin(context: Option<&mut V8Context>) -> Option<String> {
+  let window = context?.global()?;
+  let value = window.value_bykey(Some(&CefString::from("origin")))?;
+  if value.is_string() != 0 {
+    let origin = CefString::from(&value.string_value()).to_string();
+    if !origin.is_empty() {
+      return Some(origin);
+    }
+  }
+  None
 }
 
 wrap_render_process_handler! {
@@ -211,13 +350,19 @@ wrap_render_process_handler! {
       extra_info: Option<&mut DictionaryValue>,
     ) {
       if let Some(browser) = browser {
-        ipc_disabled_browsers().lock().unwrap().created(browser.identifier(), extra_info.as_deref());
+        browser_ipc_policies()
+          .lock()
+          .unwrap()
+          .created(browser.identifier(), extra_info.as_deref());
       }
     }
 
     fn on_browser_destroyed(&self, browser: Option<&mut Browser>) {
       if let Some(browser) = browser {
-        ipc_disabled_browsers().lock().unwrap().destroyed(browser.identifier());
+        browser_ipc_policies()
+          .lock()
+          .unwrap()
+          .destroyed(browser.identifier());
       }
     }
 
@@ -227,11 +372,28 @@ wrap_render_process_handler! {
       frame: Option<&mut Frame>,
       context: Option<&mut V8Context>,
     ) {
-      if browser.is_none_or(|browser| ipc_disabled_browsers().lock().unwrap().contains(browser.identifier())) {
+      let mut context = context;
+      let Some(browser) = browser else {
+        return;
+      };
+      let policy = browser_ipc_policies()
+        .lock()
+        .unwrap()
+        .policy(browser.identifier());
+      let Some(frame) = frame else {
+        return;
+      };
+      let window_origin = context_window_origin(context.as_deref_mut());
+      let frame_url = CefString::from(&frame.url()).to_string();
+      if !policy.allows_context(
+        frame.is_main() != 0,
+        window_origin.as_deref(),
+        &frame_url,
+      ) {
         return;
       }
       let hosts = frame_hosts_without_ipc();
-      if !hosts.is_empty() && frame.is_some_and(|frame| frame_without_ipc(frame, hosts)) {
+      if !hosts.is_empty() && frame_without_ipc(frame, hosts) {
         return;
       }
       install_ipc_post_message(context);
@@ -356,9 +518,39 @@ fn main() {
 #[cfg(test)]
 mod tests {
   use super::{
-    API_VERSION_SWITCH, FRAME_HOSTS_WITHOUT_IPC_SWITCH, child_process_api_version,
-    frame_hosts_without_ipc_from, url_on_hosts,
+    API_VERSION_SWITCH, FRAME_HOSTS_WITHOUT_IPC_SWITCH, RendererIpcPolicy,
+    child_process_api_version, frame_hosts_without_ipc_from, url_on_hosts, url_origin,
   };
+
+  #[test]
+  fn renderer_ipc_policy_admits_only_non_opaque_allowed_main_frames() {
+    let policy = RendererIpcPolicy::MainFrameOnly {
+      allowed_origins: vec!["http://tauri.localhost".into()],
+      has_remote_urls: false,
+    };
+    assert!(policy.allows_context(
+      true,
+      Some("http://tauri.localhost"),
+      "http://tauri.localhost/"
+    ));
+    assert!(policy.allows_context(true, Some("http://tauri.localhost"), "about:blank"));
+    assert!(!policy.allows_context(true, Some("null"), "http://tauri.localhost/"));
+    assert!(!policy.allows_context(
+      false,
+      Some("http://tauri.localhost"),
+      "http://tauri.localhost/child"
+    ));
+    assert!(!policy.allows_context(
+      true,
+      Some("http://apps.localhost:5555"),
+      "http://apps.localhost:5555/report"
+    ));
+    assert_eq!(
+      url_origin("http://Tauri.Localhost:80/index.html").as_deref(),
+      Some("http://tauri.localhost")
+    );
+    assert_eq!(url_origin("data:text/html,hi"), None);
+  }
 
   #[test]
   fn reads_the_frame_hosts_without_ipc() {

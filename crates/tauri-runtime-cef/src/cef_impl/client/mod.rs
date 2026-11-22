@@ -95,6 +95,7 @@ wrap_with_args! {
     pub(crate) label: String,
     initial_url: Option<String>,
     without_ipc: bool,
+    pub(crate) ipc_access_policy: Option<Arc<tauri_runtime::webview::IpcAccessPolicy>>,
     blocked_app_protocols: Arc<Vec<String>>,
     devtools_enabled: bool,
     zoom_hotkeys_enabled: bool,
@@ -177,6 +178,7 @@ wrap_with_args! {
       let cef_media_permission_handler = self.handlers.cef_media_permission_handler.clone();
       let family = self.popup_family.clone();
       let without_ipc = self.without_ipc;
+      let ipc_access_policy = self.ipc_access_policy.clone();
       let blocked_app_protocols = self.blocked_app_protocols.clone();
       let create_popup: Arc<life_span::PopupClientFactory> = Arc::new(move |opener, state| {
         let events = state.clone();
@@ -187,6 +189,7 @@ wrap_with_args! {
           label: label.clone(),
           initial_url: None,
           without_ipc,
+          ipc_access_policy: ipc_access_policy.clone(),
           blocked_app_protocols: blocked_app_protocols.clone(),
           devtools_enabled,
           zoom_hotkeys_enabled,
@@ -253,6 +256,7 @@ wrap_with_args! {
         new_window_handler: self.handlers.new_window_handler.clone(),
         initial_url: self.initial_url.clone(),
         without_ipc,
+        ipc_access_policy: self.ipc_access_policy.clone(),
         frame_navigation_state: self.frame_navigation_state.clone(),
         popup_family: self.popup_family.clone(),
         opener: self.opener.clone(),

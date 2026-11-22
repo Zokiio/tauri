@@ -79,6 +79,7 @@ pub(crate) struct CreatedEvent {
   pub(crate) label: String,
 }
 
+#[cfg(test)]
 fn is_url_for_custom_protocol(current_url: &Url, protocol: &str, protocol_url: &Url) -> bool {
   if protocol_url.scheme() == protocol {
     current_url.scheme() == protocol
@@ -2068,17 +2069,6 @@ impl<R: Runtime> Webview<R> {
           .get_app_url(uses_https)
           .make_relative(current_url)
           .is_some()
-
-      // or from a custom protocol registered by the user
-      || ({
-        let protocols = self.manager().webview.uri_scheme_protocols.lock().unwrap();
-
-        protocols.keys().any(|protocol| {
-          let protocol_url = Url::parse(&self.manager().custom_scheme_url(protocol, uses_https)).unwrap();
-
-          is_url_for_custom_protocol(current_url, protocol, &protocol_url)
-        })
-      })
   }
 
   /// Handles this window receiving an [`InvokeRequest`].
@@ -2813,7 +2803,7 @@ mod tests {
   }
 
   #[test]
-  fn direct_custom_protocol_is_local() {
+  fn direct_custom_protocol_is_not_local_by_default() {
     use crate::test::{mock_builder, mock_context, noop_assets};
 
     let app = mock_builder()
@@ -2829,7 +2819,9 @@ mod tests {
 
     let url = |s| Url::parse(s).unwrap();
 
-    assert!(webview.is_local_url(&url("myproto://localhost/")));
+    // User-registered custom protocols can serve untrusted documents (e.g. sandboxed app
+    // frames) and must not inherit `Origin::Local` implicitly.
+    assert!(!webview.is_local_url(&url("myproto://localhost/")));
     assert!(!webview.is_local_url(&url("https://myproto.localhost/")));
   }
 

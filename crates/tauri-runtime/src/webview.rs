@@ -378,6 +378,77 @@ impl<T: UserEvent, R: Runtime<T>> PartialEq for DetachedWebview<T, R> {
   }
 }
 
+/// Which frames and origins in a webview may receive the native IPC bridge
+/// (`window.ipc`) and call the `ipc` custom protocol.
+///
+/// Derived from Tauri's capability ACL so IPC transport exposure matches
+/// capability access instead of exposing `window.ipc` and `ipc://` to every
+/// frame unconditionally.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IpcAccessPolicy {
+  /// No frame in this webview may access IPC (equivalent to `without_ipc`).
+  Disabled,
+  /// Only main frames whose effective origin is non-opaque and matches an
+  /// allowed local origin or a capability's `remote.urls` pattern may access IPC.
+  MainFrameOnly {
+    /// Serialized origins (`scheme://host[:port]`) admitted for local app content.
+    allowed_origins: Vec<String>,
+    /// URL patterns from `Capability.remote.urls` admitted for this webview.
+    remote_urls: Vec<tauri_utils::acl::RemoteUrlPattern>,
+  },
+}
+
+impl IpcAccessPolicy {
+  /// Extracts a normalized `scheme://host[:port]` origin for HTTP(S) and Tauri custom-scheme
+  /// URLs, returning `None` for opaque schemes (`data:`, `blob:`, `about:`, `file:`, etc.).
+  ///
+  /// `url::Url::origin()` returns an opaque `"null"` origin for non-special schemes such as
+  /// `tauri://localhost` (used by Wry on macOS/Linux/iOS), so we normalize authority-bearing
+  /// schemes explicitly rather than delegating to WHATWG special-scheme rules alone.
+  pub fn normalized_origin(url: &Url) -> Option<String> {
+    let scheme = url.scheme().to_ascii_lowercase();
+    if matches!(
+      scheme.as_str(),
+      "about" | "blob" | "data" | "file" | "javascript"
+    ) {
+      return None;
+    }
+    let host = url.host_str()?;
+    if host.is_empty() {
+      return None;
+    }
+    let port = url.port().filter(|&p| {
+      !((scheme == "http" && p == 80) || (scheme == "https" && p == 443))
+    });
+    Some(match port {
+      Some(p) => format!("{scheme}://{}:{p}", host.to_ascii_lowercase()),
+      None => format!("{scheme}://{}", host.to_ascii_lowercase()),
+    })
+  }
+
+  /// Whether a document at `url` in a frame with `is_main_frame` is admitted to IPC.
+  pub fn allows_url(&self, url: &Url, is_main_frame: bool) -> bool {
+    match self {
+      Self::Disabled => false,
+      Self::MainFrameOnly {
+        allowed_origins,
+        remote_urls,
+      } => {
+        if !is_main_frame {
+          return false;
+        }
+        let Some(origin) = Self::normalized_origin(url) else {
+          return false;
+        };
+        allowed_origins
+          .iter()
+          .any(|allowed| allowed.eq_ignore_ascii_case(&origin))
+          || remote_urls.iter().any(|pattern| pattern.test(url))
+      }
+    }
+  }
+}
+
 /// The attributes used to create an webview.
 #[derive(Debug)]
 pub struct WebviewAttributes {
@@ -385,6 +456,8 @@ pub struct WebviewAttributes {
   pub user_agent: Option<String>,
   /// Whether to omit the Tauri JavaScript IPC bridge and app protocols.
   pub without_ipc: bool,
+  /// Capability-derived IPC transport admission policy for this webview.
+  pub ipc_access_policy: Option<IpcAccessPolicy>,
   /// A list of initialization javascript scripts to run when loading new pages.
   /// When webview load a new page, this initialization code will be executed.
   /// It is guaranteed that code is executed before `window.onload`.
@@ -547,6 +620,7 @@ impl WebviewAttributes {
       url,
       user_agent: None,
       without_ipc: false,
+      ipc_access_policy: None,
       initialization_scripts: Vec::new(),
       data_directory: None,
       drag_drop_handler_enabled: true,

@@ -734,6 +734,11 @@ impl<T: UserEvent> WinitCefApp<T> {
       scale,
     );
     let without_ipc = pending.webview_attributes.without_ipc;
+    let ipc_access_policy = pending
+      .webview_attributes
+      .ipc_access_policy
+      .clone()
+      .map(Arc::new);
     let devtools_enabled = context.devtools_allowed
       && (cfg!(debug_assertions) || cfg!(feature = "devtools"))
       && pending.webview_attributes.devtools.unwrap_or(true);
@@ -856,6 +861,7 @@ impl<T: UserEvent> WinitCefApp<T> {
         label: pending.label.clone(),
         initial_url: Some(pending.url.as_str().to_string()),
         without_ipc,
+        ipc_access_policy: ipc_access_policy.clone(),
         blocked_app_protocols,
         devtools_enabled,
         zoom_hotkeys_enabled,
@@ -953,8 +959,15 @@ impl<T: UserEvent> WinitCefApp<T> {
         // navigation; the real URL is loaded once the document-start script is set.
         let initial_url = CefString::from(INITIAL_LOAD_URL);
         let mut extra_info = None;
-        if without_ipc && !crate::cef_impl::ipc::mark_without_ipc(&mut extra_info) {
-          log::error!("failed to mark CEF webview {label:?} as IPC-disabled");
+        if without_ipc {
+          if !crate::cef_impl::ipc::mark_without_ipc(&mut extra_info) {
+            log::error!("failed to mark CEF webview {label:?} as IPC-disabled");
+            return;
+          }
+        } else if let Some(policy) = ipc_access_policy.as_deref()
+          && !crate::cef_impl::ipc::write_ipc_policy(&mut extra_info, policy)
+        {
+          log::error!("failed to write IPC access policy for CEF webview {label:?}");
           return;
         }
         let Some(browser) = cef::browser_host_create_browser_sync(
@@ -983,6 +996,7 @@ impl<T: UserEvent> WinitCefApp<T> {
                 label.clone(),
                 handler.clone(),
                 initialization_scripts.clone(),
+                ipc_access_policy.clone(),
               ),
             );
           }
