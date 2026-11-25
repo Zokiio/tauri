@@ -50,12 +50,20 @@ wrap_with_args! {
 
     fn on_title_change(
       &self,
-      _browser: Option<&mut Browser>,
+      browser: Option<&mut Browser>,
       title: Option<&CefString>,
     ) {
       let Some(handler) = &self.document_title_changed_handler else {
         return;
       };
+      // Scoped like the console handler: CEF routes browsers this webview does
+      // not own through this client (a DevTools window, a popup), and their
+      // titles must not retitle this webview's window.
+      if !browser.is_some_and(|browser| {
+        self.frame_navigation_state.has_browser_id(browser.identifier())
+      }) {
+        return;
+      }
       let Some(title) = title else {
         return;
       };

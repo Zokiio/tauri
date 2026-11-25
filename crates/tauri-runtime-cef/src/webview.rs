@@ -2431,6 +2431,13 @@ cef::wrap_dev_tools_message_observer! {
         return;
       };
 
+      // Move the registration out and release the guard before anything else.
+      // CEF holds this observer only through the registration, and the
+      // registration's mutex lives inside the observer: dropping it here would
+      // free the observer, and the mutex with it, while this callback still runs
+      // and the guard still has to unlock.
+      let registration = self.registration.lock().unwrap().take();
+
       let result = if success != 0 {
         runtime_evaluate_result_to_json(result)
       } else {
@@ -2438,8 +2445,41 @@ cef::wrap_dev_tools_message_observer! {
       };
       callback(result);
 
-      let _ = self.registration.lock().unwrap().take();
+      if let Some(registration) = registration {
+        post_drop_registration(registration);
+      }
     }
+  }
+}
+
+wrap_task! {
+  struct DropRegistrationTask {
+    registration: Arc<Mutex<Option<cef::Registration>>>,
+  }
+
+  impl Task {
+    fn execute(&self) {
+      let registration = self.registration.lock().unwrap().take();
+      drop(registration);
+    }
+  }
+}
+
+/// Unregisters a DevTools message observer from a later UI-thread task.
+///
+/// A one-shot observer must not drop its own [`cef::Registration`] inside its
+/// callback: unregistering releases the observer while CEF is still dispatching
+/// to it. The task runs after the dispatch has returned.
+fn post_drop_registration(registration: cef::Registration) {
+  let registration = Arc::new(Mutex::new(Some(registration)));
+  let mut task = DropRegistrationTask::new(registration.clone());
+  if cef::post_task(sys::cef_thread_id_t::TID_UI.into(), Some(&mut task)) == 0 {
+    // CEF runs no more tasks once it is shutting down. Dropping the registration
+    // here would unregister inside the callback after all, so it is left to the
+    // process exit instead.
+    log::warn!("could not defer a DevTools observer unregistration to the UI thread");
+    let registration = registration.lock().unwrap().take();
+    std::mem::forget(registration);
   }
 }
 
