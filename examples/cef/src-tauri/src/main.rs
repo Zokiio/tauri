@@ -63,6 +63,7 @@ fn main() {
       commands::runtime_info,
       commands::native_snapshot,
       commands::send_devtools_message,
+      commands::eval_with_callback_sequence,
       commands::open_accelerator_window,
       commands::open_child_webviews_window,
       offscreen::open_offscreen_window,

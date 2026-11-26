@@ -321,6 +321,38 @@ pub async fn send_devtools_message(
   Ok(message_id)
 }
 
+/// Evaluates `count` scripts in the calling webview one after another with
+/// `Webview::eval_with_callback`, each waiting for its result.
+///
+/// The runtime answers each evaluation through a one-shot DevTools observer that
+/// unregisters itself once its result is in. Unregistering from inside the
+/// observer's own callback freed the observer while it was still running, and
+/// the first answered evaluation crashed the app.
+#[tauri::command]
+pub async fn eval_with_callback_sequence(
+  webview: tauri::Webview,
+  count: u32,
+) -> Result<Vec<String>, String> {
+  tauri::async_runtime::spawn_blocking(move || {
+    let mut results = Vec::new();
+    for index in 0..count {
+      let (tx, rx) = std::sync::mpsc::channel();
+      webview
+        .eval_with_callback(format!("{index} * 2"), move |result| {
+          let _ = tx.send(result);
+        })
+        .map_err(|error| error.to_string())?;
+      let result = rx
+        .recv_timeout(NATIVE_TIMEOUT)
+        .map_err(|_| format!("evaluation {index} was not answered"))?;
+      results.push(result);
+    }
+    Ok(results)
+  })
+  .await
+  .map_err(|error| error.to_string())?
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AcceleratorWindowOptions {
